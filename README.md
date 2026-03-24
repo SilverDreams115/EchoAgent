@@ -1,55 +1,100 @@
-# Echo
+# EchoAgent
 
-Echo is a local coding agent CLI with:
-- multiline composer
-- live activity panel
-- clean `.echo/` state per repo
-- backend layer for Ollama and OpenAI-compatible APIs
-- native and compatibility tool execution
-- execution profiles: local, balanced, deep
-- file tools and safe shell execution
-- resumable sessions
-- operational memory with context compression
-- explicit runtime phases: intake, planner, inspector, executor, verifier, summarizer
+[![CI](https://github.com/SilverDreams115/EchoAgent/actions/workflows/ci.yml/badge.svg)](https://github.com/SilverDreams115/EchoAgent/actions/workflows/ci.yml)
 
-## Run
+Echo is a local coding agent CLI focused on grounded repo inspection, real tool execution, resumable sessions, backend-aware routing, and honest degradation when the model or backend is weak.
+
+## What It Does
+
+- inspects real project files before answering
+- executes real tools for file reads, patches, shell commands, validation, and git inspection
+- keeps per-repo operational state under `.echo/`
+- supports Ollama and OpenAI-compatible backends
+- uses `local`, `balanced`, and `deep` execution profiles
+- preserves resumable working state with compression and memory summaries
+- degrades cleanly when the backend is unavailable or unstable
+
+## Install
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -e .
-echocode doctor
-echocode shell
-echocode ask "inspecciona este proyecto"
-echocode plan "propón cambios mínimos"
-echocode resume
-ECHO_BACKEND_TIMEOUT=240 ECHO_OLLAMA_KEEP_ALIVE=15m echocode ask "haz una inspección profunda"
 ```
 
-## Backends
+## Quick Start
 
 ```bash
-ECHO_BACKEND=ollama ECHO_MODEL=qwen2.5-coder:7b-oh echocode doctor
-ECHO_BACKEND=openai-compatible ECHO_OPENAI_API_KEY=... ECHO_MODEL=gpt-4.1-mini echocode doctor
+echocode doctor
+echocode backend-check --chat-samples 1
+echocode shell
+echocode ask "inspecciona este proyecto"
+echocode plan "propón un cambio seguro"
+echocode resume
 ```
 
 ## Profiles
 
+- `local`: local-first, practical, grounded, best when Ollama is healthy.
+- `balanced`: stronger defaults for non-trivial asks, with hybrid routing when fallback exists.
+- `deep`: prefers a frontier backend and can enforce strict backend availability.
+
 ```bash
 echocode doctor --profile local
-echocode ask --profile local "inspecciona este repo"
-echocode plan --profile balanced "propón un cambio seguro"
+echocode ask --profile balanced "analiza runtime y routing"
 echocode ask --profile deep "haz análisis profundo"
 echocode ask --profile deep --strict-profile "haz análisis profundo"
+```
+
+## Backend Setup
+
+### Ollama
+
+```bash
+ECHO_BACKEND=ollama \
+ECHO_MODEL=qwen2.5-coder:7b-oh \
+echocode doctor
+```
+
+### OpenAI-Compatible
+
+```bash
+ECHO_BACKEND=openai-compatible \
+ECHO_MODEL=gpt-4.1-mini \
+ECHO_OPENAI_API_KEY=YOUR_KEY \
+echocode doctor
+```
+
+### Strict Deep Profile
+
+```bash
+ECHO_OPENAI_API_KEY=YOUR_KEY \
 echocode smoke --profile deep --strict-profile "haz una verificación breve del backend"
 ```
 
-- `local`: Ollama, rápido, grounded, con tool execution en modo compatibilidad.
-- `balanced`: prioriza un modelo práctico; usa fallback a local si falta backend frontier.
-- `deep`: prioriza backend frontier y degrada a `balanced` si falta configuración.
+## Validation
 
-Si quieres exigir `deep` real y fallar si no está configurado:
+Echo already uses `unittest` when the repo matches that layout.
 
 ```bash
-ECHO_OPENAI_API_KEY=TU_API_KEY echocode doctor --profile deep --strict-profile
-ECHO_OPENAI_API_KEY=TU_API_KEY echocode ask --profile deep --strict-profile "haz análisis profundo"
-ECHO_OPENAI_API_KEY=TU_API_KEY echocode smoke --profile deep --strict-profile "haz una verificación breve del backend"
+python -m unittest discover -s tests -p 'test_*.py'
+echocode smoke "diagnóstico breve del backend actual"
+```
+
+## Operational Notes
+
+- Echo stores runtime state, logs, memory, and session artifacts under `.echo/`.
+- `.gitignore` excludes `.echo/`, virtual environments, caches, and local secrets.
+- For critical `ask` workflows, use a healthy OpenAI-compatible fallback if Ollama chat is unstable.
+- `doctor` shows cached, fresh, and effective backend state so routing decisions are auditable.
+
+## Useful Commands
+
+```bash
+echocode doctor
+echocode backend-check --chat-samples 2
+echocode ask "inspecciona echo/runtime/engine.py y explica el flujo"
+echocode plan "refuerza grounding y runtime"
+echocode resume "continúa desde la última sesión"
+echocode smoke "valida doctor, ask y resume"
 ```
