@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+import uuid
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass(slots=True)
+class ActivityEvent:
+    stage: str
+    status: str
+    message: str
+    detail: str = ""
+    created_at: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class ToolCallRecord:
+    tool: str
+    arguments: dict[str, Any]
+    result_preview: str
+    created_at: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class GroundingReport:
+    grounded_file_count: int = 0
+    grounded_symbol_count: int = 0
+    evidence_usage: int = 0
+    genericity_score: int = 0
+    validation_strategy_match: bool = True
+    validation_strategy: str = "unknown"
+    speculation_flags: list[str] = field(default_factory=list)
+    valid: bool = True
+    reason: str = "ok"
+
+
+@dataclass(slots=True)
+class BackendHealth:
+    backend_reachable: bool = False
+    backend_chat_ready: bool = False
+    backend_chat_slow: bool = False
+    backend_state: str = "unknown"
+    last_success_ms: int = 0
+    last_timeout_ms: int = 0
+    average_chat_ms: int = 0
+    recent_failures: int = 0
+    success_rate: float = 0.0
+    chat_probe_count: int = 0
+    tags_latency_ms: int = 0
+    warm_state: str = "unknown"
+    last_error: str = ""
+    checked_at: str = field(default_factory=utc_now)
+    source: str = "rolling"
+    backend_name: str = ""
+    model: str = ""
+    detail: str = ""
+
+
+@dataclass(slots=True)
+class RoutingDecision:
+    primary_backend: str = ""
+    primary_model: str = ""
+    selected_backend: str = ""
+    selected_model: str = ""
+    fallback_backend: str = ""
+    fallback_model: str = ""
+    fallback_available: bool = False
+    fallback_selected: bool = False
+    policy: str = "primary-only"
+    task_complexity: str = "low"
+    reason: str = ""
+
+
+@dataclass(slots=True)
+class RuntimeArtifact:
+    kind: str
+    path: str
+    detail: str = ""
+
+
+@dataclass(slots=True)
+class SessionState:
+    id: str
+    repo_root: str
+    mode: str
+    model: str
+    user_prompt: str
+    objective: str = ""
+    restrictions: list[str] = field(default_factory=list)
+    summary: str = ""
+    operational_summary: str = ""
+    cold_summary_path: str = ""
+    focus_files: list[str] = field(default_factory=list)
+    working_set: list[str] = field(default_factory=list)
+    decisions: list[str] = field(default_factory=list)
+    findings: list[str] = field(default_factory=list)
+    pending: list[str] = field(default_factory=list)
+    changed_files: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    parent_session_id: str = ""
+    grounded_answer: bool = False
+    grounding_report: dict[str, Any] = field(default_factory=dict)
+    routing: dict[str, Any] = field(default_factory=dict)
+    health: dict[str, Any] = field(default_factory=dict)
+    retry_count: int = 0
+    compression_count: int = 0
+    degraded_reason: str = ""
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    tool_calls: list[ToolCallRecord] = field(default_factory=list)
+    activity: list[ActivityEvent] = field(default_factory=list)
+    validation: list[str] = field(default_factory=list)
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+    @classmethod
+    def create(cls, repo_root: str, mode: str, model: str, user_prompt: str) -> "SessionState":
+        return cls(
+            id=f"session-{uuid.uuid4().hex[:12]}",
+            repo_root=repo_root,
+            mode=mode,
+            model=model,
+            user_prompt=user_prompt,
+            objective=user_prompt,
+        )
+
+
+@dataclass(slots=True)
+class PhaseRecord:
+    phase: str
+    status: str
+    detail: str = ""
+    created_at: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class RunState:
+    session_id: str
+    mode: str
+    profile: str
+    objective: str
+    repo_root: str
+    backend: str
+    model: str
+    constraints: list[str] = field(default_factory=list)
+    focus_files: list[str] = field(default_factory=list)
+    inspected_files: list[str] = field(default_factory=list)
+    changed_files: list[str] = field(default_factory=list)
+    validation_commands: list[str] = field(default_factory=list)
+    open_issues: list[str] = field(default_factory=list)
+    decisions: list[str] = field(default_factory=list)
+    findings: list[str] = field(default_factory=list)
+    pending: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    phases: list[PhaseRecord] = field(default_factory=list)
+    context_free_ratio: float = 1.0
+    backend_duration_ms: list[int] = field(default_factory=list)
+    backend_health: BackendHealth = field(default_factory=BackendHealth)
+    fresh_backend_health: BackendHealth = field(default_factory=lambda: BackendHealth(source="fresh"))
+    routing: RoutingDecision = field(default_factory=RoutingDecision)
+    fallback_used: bool = False
+    fallback_reason: str = ""
+    grounding_report: GroundingReport = field(default_factory=GroundingReport)
+    retry_count: int = 0
+    compression_count: int = 0
+    artifacts: list[RuntimeArtifact] = field(default_factory=list)
