@@ -1,4 +1,5 @@
 from .availability import BackendAvailabilityPolicy, BackendCheckResult, BackendRouteDecision, quick_health_probe, run_backend_check
+from .health import backend_log_state, effective_backend_health, normalize_backend_health
 from echo.config import Settings
 
 from .openai_compatible import OpenAICompatibleBackend
@@ -34,4 +35,7 @@ __all__ = [
     "build_backend",
     "quick_health_probe",
     "run_backend_check",
+    "normalize_backend_health",
+    "effective_backend_health",
+    "backend_log_state",
 ]

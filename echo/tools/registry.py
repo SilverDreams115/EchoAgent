@@ -5,9 +5,11 @@ import difflib
 import json
 from pathlib import Path
 import re
+import shlex
 import subprocess
 from typing import Any
 
+from echo.cognition.validation import detect_validation_plan
 from echo.config import Settings
 from echo.memory import EchoStore
 from echo.runtime.activity import ActivityBus
@@ -18,6 +20,47 @@ TEXT_PATTERNS = [
     re.compile(r"^\s*class\s+([a-zA-Z0-9_]+)\s*[:(]", re.MULTILINE),
     re.compile(r"^\s*async\s+def\s+([a-zA-Z0-9_]+)\s*\(", re.MULTILINE),
 ]
+SHELL_META_PATTERN = re.compile(r"[|&;<>`]|(?:\$\()")
+BLOCKED_EXECUTABLES = {"rm", "mkfs", "shutdown", "reboot", "poweroff", "sudo", "su", "dd"}
+SAFE_COMMAND_POLICIES: dict[str, set[tuple[str, ...]]] = {
+    "python": {
+        ("-m", "compileall"),
+        ("-m", "unittest"),
+        ("-m", "pytest"),
+        ("-m", "pip"),
+    },
+    "python3": {
+        ("-m", "compileall"),
+        ("-m", "unittest"),
+        ("-m", "pytest"),
+        ("-m", "pip"),
+    },
+    "pytest": {()},
+    "git": {
+        ("status",),
+        ("diff",),
+    },
+    "npm": {
+        ("test",),
+        ("run", "test"),
+        ("run", "lint"),
+        ("run", "build"),
+        ("run", "check"),
+    },
+    "pnpm": {
+        ("test",),
+        ("run", "test"),
+        ("run", "lint"),
+        ("run", "build"),
+        ("run", "check"),
+    },
+    "yarn": {
+        ("test",),
+        ("lint",),
+        ("build",),
+        ("check",),
+    },
+}
 
 
 class ToolRegistry:
@@ -111,6 +154,44 @@ class ToolRegistry:
     def _log_command(self, payload: dict[str, object]) -> None:
         payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
         self.store.append_command_log(payload)
+
+    def _reject_command(self, command: str, reason: str, argv: list[str] | None = None) -> dict[str, Any]:
+        result = {
+            "command": command,
+            "argv": argv or [],
+            "policy_decision": "blocked",
+            "error": reason,
+        }
+        self._log_command({"kind": "tool-policy", "tool": "run_shell", "command": command, "argv": argv or [], "decision": "blocked", "reason": reason})
+        return result
+
+    def _validate_shell_command(self, command: str) -> tuple[list[str] | None, str | None]:
+        stripped = command.strip()
+        if not stripped:
+            return None, "Shell command is empty."
+        if SHELL_META_PATTERN.search(stripped):
+            return None, "Shell metacharacters are not allowed."
+        try:
+            argv = shlex.split(stripped, posix=True)
+        except ValueError as exc:
+            return None, f"Shell command could not be parsed safely: {exc}"
+        if not argv:
+            return None, "Shell command is empty."
+        executable = argv[0]
+        if executable in BLOCKED_EXECUTABLES:
+            return None, f"Executable blocked by policy: {executable}"
+        if executable not in SAFE_COMMAND_POLICIES:
+            return None, f"Executable not allowed by policy: {executable}"
+        if executable == "git":
+            if len(argv) >= 3 and argv[1] == "reset" and "--hard" in argv[2:]:
+                return None, "Git reset --hard is blocked by policy."
+            if len(argv) >= 2 and argv[1] == "clean":
+                return None, "Git clean is blocked by policy."
+        allowed_prefixes = SAFE_COMMAND_POLICIES[executable]
+        tail = tuple(argv[1:])
+        if not any(tail[: len(prefix)] == prefix for prefix in allowed_prefixes):
+            return None, f"Arguments not allowed by policy for executable: {executable}"
+        return argv, None
 
     def _in_git_repo(self) -> bool:
         return (self.project_root / ".git").exists()
@@ -284,23 +365,13 @@ class ToolRegistry:
         if not self.settings.allow_shell:
             return {"error": "Shell execution is disabled by policy."}
         command = str(arguments["command"])
-        blocked = [
-            "rm -rf",
-            "rm -fr",
-            "git reset --hard",
-            "git clean -fd",
-            "mkfs",
-            "shutdown",
-            "reboot",
-            "poweroff",
-            ":(){:|:&};:",
-        ]
-        if any(token in command for token in blocked) or re.search(r"(^|[;&|]\s*)rm\s+-[^\n]*\b(f|r)\b", command):
-            return {"error": f"Blocked dangerous command: {command}"}
+        argv, error = self._validate_shell_command(command)
+        if error:
+            return self._reject_command(command, error, argv)
         self.activity.emit("Executor", "running", "Executor running shell", command)
         completed = subprocess.run(
-            command,
-            shell=True,
+            argv,
+            shell=False,
             cwd=self.project_root,
             capture_output=True,
             text=True,
@@ -310,18 +381,34 @@ class ToolRegistry:
         self.activity.emit("Verifier", status, "Shell command finished", f"rc={completed.returncode}")
         return {
             "command": command,
+            "argv": argv,
+            "policy_decision": "allowed",
             "returncode": completed.returncode,
             "stdout": completed.stdout[-12000:],
             "stderr": completed.stderr[-12000:],
         }
 
     def tool_validate_project(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        command = "python -m compileall echo"
-        if (self.project_root / "tests").exists():
-            command = "python -m unittest discover -s tests -p 'test_*.py'"
-        self.activity.emit("Verifier", "running", "Verifier running tests", command)
-        result = self.tool_run_shell({"command": command})
-        return {"validation_command": command, **result}
+        plan = detect_validation_plan(self.project_root)
+        if plan.strategy == "unknown" or not plan.command:
+            self.activity.emit("Verifier", "warning", "Verifier validation unavailable", plan.reason)
+            return {
+                "validation_strategy": plan.strategy,
+                "validation_reason": plan.reason,
+                "validation_command": "",
+                "returncode": -1,
+                "stdout": "",
+                "stderr": "",
+                "error": "No safe validation strategy available for this repository.",
+            }
+        self.activity.emit("Verifier", "running", "Verifier running tests", plan.command)
+        result = self.tool_run_shell({"command": plan.command})
+        return {
+            "validation_strategy": plan.strategy,
+            "validation_reason": plan.reason,
+            "validation_command": plan.command,
+            **result,
+        }
 
     def tool_git_status(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if not self._in_git_repo():

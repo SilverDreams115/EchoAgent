@@ -123,7 +123,7 @@ class EchoAgent:
 
     def doctor(self) -> dict[str, Any]:
         rolling = self.store.read_backend_health()
-        fresh = quick_health_probe(self.backend, self.settings, include_chat=False)
+        fresh = quick_health_probe(self.backend, self.settings, include_chat=True)
         effective = BackendAvailabilityPolicy.effective_backend_health(rolling, fresh)
         try:
             models = self.backend.list_models()
@@ -133,9 +133,6 @@ class EchoAgent:
             models = []
             backend_ok = False
             backend_error = str(exc)
-            fresh.backend_reachable = False
-            fresh.backend_chat_ready = False
-            fresh.backend_state = "unreachable" if fresh.last_error else "unknown"
             effective = BackendAvailabilityPolicy.effective_backend_health(rolling, fresh)
         recommended_model = self._recommended_model(models)
         return {
@@ -187,11 +184,6 @@ class EchoAgent:
     def backend_check(self, chat_samples: int = 2) -> dict[str, Any]:
         result = run_backend_check(self.backend, self.settings, self.store, chat_samples=chat_samples)
         effective_health = self.store.read_backend_health()
-        effective_health.backend_reachable = bool(result.effective_decision.get("effective_backend_reachable", effective_health.backend_reachable))
-        effective_health.backend_chat_ready = bool(result.effective_decision.get("effective_backend_chat_ready", effective_health.backend_chat_ready))
-        effective_health.backend_chat_slow = bool(result.effective_decision.get("effective_backend_chat_slow", effective_health.backend_chat_slow))
-        effective_health.backend_state = str(result.effective_decision.get("effective_backend_state", effective_health.backend_state))
-        effective_health.source = str(result.effective_decision.get("effective_source", effective_health.source))
         route = BackendAvailabilityPolicy.route_backend(
             self.settings,
             profile=self.resolved_profile,

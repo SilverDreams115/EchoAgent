@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from echo.backends.errors import BackendError, BackendTimeoutError, BackendUnreachableError
+from echo.backends.health import (
+    backend_log_state,
+    effective_backend_health as merged_backend_health,
+    normalize_backend_health,
+)
 from echo.config import Settings
 from echo.memory import EchoStore
 from echo.types import BackendHealth
@@ -123,13 +128,7 @@ class BackendAvailabilityPolicy:
 
     @staticmethod
     def effective_backend_health(rolling: BackendHealth, fresh: BackendHealth | None = None) -> BackendHealth:
-        if fresh is None:
-            return rolling
-        if fresh.backend_chat_ready or fresh.backend_state in {"ready", "slow"}:
-            return fresh
-        if fresh.backend_state in {"timeout", "unreachable", "unstable", "malformed", "error"}:
-            return fresh
-        return rolling
+        return merged_backend_health(rolling, fresh)
 
 
 def quick_health_probe(backend: Any, settings: Settings, *, include_chat: bool = True) -> BackendHealth:
@@ -149,24 +148,24 @@ def quick_health_probe(backend: Any, settings: Settings, *, include_chat: bool =
         health.last_timeout_ms = int((time.perf_counter() - started) * 1000)
         health.last_error = str(exc)
         health.detail = "fresh tags probe timeout"
-        return health
+        return normalize_backend_health(health, source="fresh")
     except BackendUnreachableError as exc:
         health.backend_reachable = False
         health.backend_state = "unreachable"
         health.last_error = str(exc)
         health.detail = "fresh tags probe unreachable"
-        return health
+        return normalize_backend_health(health, source="fresh")
     except BackendError as exc:
         health.backend_reachable = False
         health.backend_state = "error"
         health.last_error = str(exc)
         health.detail = "fresh tags probe error"
-        return health
+        return normalize_backend_health(health, source="fresh")
 
     if not include_chat:
         health.backend_state = "reachable"
         health.detail = "fresh tags probe only"
-        return health
+        return normalize_backend_health(health, source="fresh")
 
     started = time.perf_counter()
     try:
@@ -188,9 +187,9 @@ def quick_health_probe(backend: Any, settings: Settings, *, include_chat: bool =
         health.last_error = str(exc)
         health.detail = "fresh chat probe timeout"
     except BackendUnreachableError as exc:
-        health.backend_reachable = False
+        health.backend_reachable = True
         health.backend_chat_ready = False
-        health.backend_state = "unreachable"
+        health.backend_state = "unstable"
         health.last_error = str(exc)
         health.detail = "fresh chat probe unreachable"
     except BackendError as exc:
@@ -199,7 +198,7 @@ def quick_health_probe(backend: Any, settings: Settings, *, include_chat: bool =
         health.backend_state = "unstable"
         health.last_error = str(exc)
         health.detail = "fresh chat probe error"
-    return health
+    return normalize_backend_health(health, source="fresh")
 
 
 def infer_task_complexity(mode: str, prompt: str, profile: str) -> str:
@@ -255,6 +254,11 @@ def run_backend_check(
             "duration_ms": tags_latency_ms,
             "ok": backend_reachable,
             "detail": failure_reasons[-1] if failure_reasons else "",
+            **backend_log_state(
+                backend_reachable=backend_reachable,
+                backend_chat_ready=False,
+                backend_state="reachable" if backend_reachable else "unreachable",
+            ),
         }
     )
 
@@ -277,6 +281,11 @@ def run_backend_check(
                     "duration_ms": elapsed,
                     "probe_index": index,
                     "ok": True,
+                    **backend_log_state(
+                        backend_reachable=True,
+                        backend_chat_ready=True,
+                        backend_chat_slow=elapsed >= settings.backend_slow_threshold_ms,
+                    ),
                 }
             )
         except BackendTimeoutError as exc:
@@ -292,6 +301,12 @@ def run_backend_check(
                     "probe_index": index,
                     "ok": False,
                     "detail": str(exc),
+                    **backend_log_state(
+                        backend_reachable=True,
+                        backend_chat_ready=False,
+                        backend_chat_slow=True,
+                        backend_state="timeout",
+                    ),
                 }
             )
         except BackendError as exc:
@@ -306,6 +321,11 @@ def run_backend_check(
                     "probe_index": index,
                     "ok": False,
                     "detail": str(exc),
+                    **backend_log_state(
+                        backend_reachable=not isinstance(exc, BackendUnreachableError),
+                        backend_chat_ready=False,
+                        backend_state="unreachable" if isinstance(exc, BackendUnreachableError) else "unstable",
+                    ),
                 }
             )
 
@@ -405,6 +425,12 @@ def run_backend_check(
             "warm_state": result.warm_state,
             "detail": result.failure_reasons[-1] if result.failure_reasons else result.backend_state,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            **backend_log_state(
+                backend_reachable=result.backend_reachable,
+                backend_chat_ready=result.backend_chat_ready,
+                backend_chat_slow=result.backend_chat_slow,
+                backend_state=result.backend_state,
+            ),
         }
     )
     return result
