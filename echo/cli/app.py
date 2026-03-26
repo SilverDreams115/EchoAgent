@@ -10,9 +10,12 @@ from rich.table import Table
 from echo.backends.errors import BackendError
 from echo.config import Settings
 from echo.core import EchoAgent
+from echo.types import BranchMeta
 from echo.ui import EchoShell
 
 app = typer.Typer(help="Echo local coding agent")
+branch_app = typer.Typer(help="Manage conversation branches within a project session")
+app.add_typer(branch_app, name="branch")
 console = Console()
 
 
@@ -22,6 +25,7 @@ def profile_option() -> str | None:
 
 def strict_profile_option() -> bool:
     return typer.Option(False, "--strict-profile", help="Fail instead of falling back when the requested profile is not ready")
+
 
 def build_agent(
     project_dir: str | None = None,
@@ -48,9 +52,23 @@ def safe_build_agent(
         raise typer.Exit(code=2)
 
 
-def safe_agent_run(agent: EchoAgent, prompt: str, *, mode: str, resume_session_id: str | None = None, profile: str | None = None):
+def safe_agent_run(
+    agent: EchoAgent,
+    prompt: str,
+    *,
+    mode: str,
+    resume_session_id: str | None = None,
+    profile: str | None = None,
+    branch_name: str | None = None,
+):
     try:
-        return agent.run(prompt, mode=mode, resume_session_id=resume_session_id, profile=profile)
+        return agent.run(
+            prompt,
+            mode=mode,
+            resume_session_id=resume_session_id,
+            profile=profile,
+            branch_name=branch_name,
+        )
     except BackendError as exc:
         console.print(f"[red]Error de backend:[/red] {exc}")
         raise typer.Exit(code=2)
@@ -100,8 +118,12 @@ def ask(
     strict_profile: bool = strict_profile_option(),
 ) -> None:
     agent, _, _ = safe_build_agent(project_dir, profile, strict_profile)
-    answer, session_path, session = safe_agent_run(agent, prompt, mode="ask", profile=profile)
-    console.print(Panel(answer, title="Echo", expand=True))
+    active = agent.store.ensure_branch_model()
+    branch_name = active.branch_name
+    answer, session_path, session = safe_agent_run(
+        agent, prompt, mode="ask", profile=profile, branch_name=branch_name
+    )
+    console.print(Panel(answer, title=f"Echo [{branch_name}]", expand=True))
     console.print(f"Sesión guardada en: {session_path}")
     console.print(f"Herramientas usadas: {len(session.tool_calls)}")
 
@@ -114,8 +136,12 @@ def plan(
     strict_profile: bool = strict_profile_option(),
 ) -> None:
     agent, _, _ = safe_build_agent(project_dir, profile, strict_profile)
-    answer, session_path, session = safe_agent_run(agent, prompt, mode="plan", profile=profile)
-    console.print(Panel(answer, title="Plan", expand=True))
+    active = agent.store.ensure_branch_model()
+    branch_name = active.branch_name
+    answer, session_path, session = safe_agent_run(
+        agent, prompt, mode="plan", profile=profile, branch_name=branch_name
+    )
+    console.print(Panel(answer, title=f"Plan [{branch_name}]", expand=True))
     console.print(f"Sesión guardada en: {session_path}")
     console.print(f"Herramientas usadas: {len(session.tool_calls)}")
 
@@ -127,20 +153,28 @@ def shell(
     strict_profile: bool = strict_profile_option(),
 ) -> None:
     agent, root, _ = safe_build_agent(project_dir, profile, strict_profile)
+    agent.store.ensure_branch_model()
     EchoShell(agent, root, console).run()
 
 
 @app.command()
 def resume(
     prompt: str = typer.Argument("Continúa desde la última sesión y sigue trabajando.", help="Prompt to continue the latest session"),
-    session_id: str | None = typer.Option(None, "--session-id", help="Specific session to resume"),
+    session_id: str | None = typer.Option(None, "--session-id", help="Specific session to resume (overrides branch head)"),
     project_dir: str | None = typer.Option(None, "--project-dir", help="Project root to inspect"),
     profile: str | None = profile_option(),
     strict_profile: bool = strict_profile_option(),
 ) -> None:
     agent, _, _ = safe_build_agent(project_dir, profile, strict_profile)
-    answer, session_path, session = safe_agent_run(agent, prompt, mode="resume", resume_session_id=session_id, profile=profile)
-    console.print(Panel(answer, title="Resume", expand=True))
+    active = agent.store.ensure_branch_model()
+    branch_name = active.branch_name
+    answer, session_path, session = safe_agent_run(
+        agent, prompt, mode="resume",
+        resume_session_id=session_id,  # explicit --session-id wins; None → branch head
+        profile=profile,
+        branch_name=branch_name,
+    )
+    console.print(Panel(answer, title=f"Resume [{branch_name}]", expand=True))
     console.print(f"Sesión guardada en: {session_path}")
     console.print(f"Herramientas usadas: {len(session.tool_calls)}")
 
@@ -239,6 +273,189 @@ def smoke(
     console.print(Panel(resume_answer, title="Smoke Resume", expand=True))
     console.print(f"Resume session: {resume_path}")
     console.print(f"Herramientas usadas en ask: {len(session.tool_calls)}")
+
+
+# ------------------------------------------------------------------ #
+# Branch commands                                                       #
+# ------------------------------------------------------------------ #
+
+@branch_app.command("status")
+def branch_status(
+    project_dir: str | None = typer.Option(None, "--project-dir", help="Project root"),
+) -> None:
+    """Show the active branch and its current head session."""
+    agent, _, _ = safe_build_agent(project_dir)
+    active = agent.store.ensure_branch_model()
+    branch = agent.store.load_branch(active.branch_name)
+
+    table = Table(title="Branch status")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("active_branch", active.branch_name)
+    if branch:
+        table.add_row("head_session", branch.head_session_id or "none")
+        table.add_row("parent_branch", branch.parent_branch or "—")
+        table.add_row("fork_session", branch.fork_session_id or "—")
+        table.add_row("description", branch.description or "—")
+        table.add_row("created_at", branch.created_at)
+        table.add_row("updated_at", branch.updated_at)
+    else:
+        table.add_row("head_session", "none")
+    console.print(table)
+
+
+@branch_app.command("list")
+def branch_list(
+    project_dir: str | None = typer.Option(None, "--project-dir", help="Project root"),
+) -> None:
+    """List all branches for this project."""
+    agent, _, _ = safe_build_agent(project_dir)
+    active = agent.store.ensure_branch_model()
+    branches = agent.store.list_branches()
+
+    table = Table(title="Branches")
+    table.add_column("Name", style="cyan")
+    table.add_column("Active", style="green")
+    table.add_column("Head session", style="white")
+    table.add_column("Parent", style="white")
+    table.add_column("Updated", style="white")
+    for branch in branches:
+        marker = "✓" if branch.name == active.branch_name else ""
+        table.add_row(
+            branch.name,
+            marker,
+            branch.head_session_id or "none",
+            branch.parent_branch or "—",
+            branch.updated_at[:19],
+        )
+    if not branches:
+        console.print("No branches found. Run any ask/plan/resume command to initialize.")
+    else:
+        console.print(table)
+
+
+@branch_app.command("new")
+def branch_new(
+    name: str = typer.Argument(..., help="Name for the new branch"),
+    from_branch: str | None = typer.Option(None, "--from", help="Source branch to fork from (default: active branch)"),
+    description: str = typer.Option("", "--description", help="Optional description"),
+    project_dir: str | None = typer.Option(None, "--project-dir", help="Project root"),
+) -> None:
+    """Create a new branch forked from the active (or specified) branch and activate it."""
+    agent, _, _ = safe_build_agent(project_dir)
+    active = agent.store.ensure_branch_model()
+
+    if agent.store.load_branch(name):
+        console.print(f"[red]Error:[/red] branch '{name}' already exists.")
+        raise typer.Exit(code=1)
+
+    source_name = from_branch or active.branch_name
+    source = agent.store.load_branch(source_name)
+    if source is None and from_branch:
+        console.print(f"[red]Error:[/red] source branch '{from_branch}' not found.")
+        raise typer.Exit(code=1)
+
+    fork_head = source.head_session_id if source else ""
+    new_branch = BranchMeta(
+        name=name,
+        head_session_id=fork_head,
+        parent_branch=source_name,
+        fork_session_id=fork_head,
+        description=description,
+    )
+    agent.store.save_branch(new_branch)
+    agent.store.set_active_branch(name)
+    console.print(f"Branch [cyan]'{name}'[/cyan] created from [white]'{source_name}'[/white] and activated.")
+    if fork_head:
+        console.print(f"Fork point: session [white]{fork_head}[/white]")
+    else:
+        console.print("Fork point: empty (no sessions on source branch yet)")
+
+
+@branch_app.command("switch")
+def branch_switch(
+    name: str = typer.Argument(..., help="Branch name to activate"),
+    project_dir: str | None = typer.Option(None, "--project-dir", help="Project root"),
+) -> None:
+    """Switch the active branch."""
+    agent, _, _ = safe_build_agent(project_dir)
+    agent.store.ensure_branch_model()
+
+    branch = agent.store.load_branch(name)
+    if branch is None:
+        console.print(f"[red]Error:[/red] branch '{name}' not found.")
+        branches = agent.store.list_branches()
+        if branches:
+            console.print("Available branches: " + ", ".join(b.name for b in branches))
+        raise typer.Exit(code=1)
+
+    agent.store.set_active_branch(name)
+    console.print(f"Switched to branch [cyan]'{name}'[/cyan].")
+    if branch.head_session_id:
+        console.print(f"Head session: [white]{branch.head_session_id}[/white]")
+    else:
+        console.print("Head session: none (branch has no sessions yet)")
+
+
+@branch_app.command("show")
+def branch_show(
+    name: str = typer.Argument(..., help="Branch name to inspect"),
+    project_dir: str | None = typer.Option(None, "--project-dir", help="Project root"),
+) -> None:
+    """Show detailed metadata for a branch."""
+    agent, _, _ = safe_build_agent(project_dir)
+    agent.store.ensure_branch_model()
+
+    branch = agent.store.load_branch(name)
+    if branch is None:
+        console.print(f"[red]Error:[/red] branch '{name}' not found.")
+        raise typer.Exit(code=1)
+
+    table = Table(title=f"Branch: {name}")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("name", branch.name)
+    table.add_row("head_session", branch.head_session_id or "none")
+    table.add_row("parent_branch", branch.parent_branch or "—")
+    table.add_row("fork_session", branch.fork_session_id or "—")
+    table.add_row("description", branch.description or "—")
+    table.add_row("created_at", branch.created_at)
+    table.add_row("updated_at", branch.updated_at)
+
+    if branch.head_session_id:
+        try:
+            session = agent.store.load_session(branch.head_session_id)
+            table.add_row("head_objective", (session.objective or session.user_prompt)[:80])
+            table.add_row("head_mode", session.mode)
+            table.add_row("head_grounded", str(session.grounded_answer))
+            table.add_row("head_tool_calls", str(len(session.tool_calls)))
+            table.add_row("head_changed_files", str(len(session.changed_files)))
+        except Exception:
+            table.add_row("head_session_detail", "unavailable")
+    console.print(table)
+
+
+@branch_app.command("delete")
+def branch_delete(
+    name: str = typer.Argument(..., help="Branch name to delete"),
+    project_dir: str | None = typer.Option(None, "--project-dir", help="Project root"),
+) -> None:
+    """Delete a branch (cannot delete 'main' or the active branch)."""
+    agent, _, _ = safe_build_agent(project_dir)
+    active = agent.store.ensure_branch_model()
+
+    if name == "main":
+        console.print("[red]Error:[/red] cannot delete the main branch.")
+        raise typer.Exit(code=1)
+    if active.branch_name == name:
+        console.print(f"[red]Error:[/red] cannot delete the active branch '{name}'. Switch to another branch first.")
+        raise typer.Exit(code=1)
+    if agent.store.load_branch(name) is None:
+        console.print(f"[red]Error:[/red] branch '{name}' not found.")
+        raise typer.Exit(code=1)
+
+    agent.store.delete_branch(name)
+    console.print(f"Branch [cyan]'{name}'[/cyan] deleted.")
 
 
 if __name__ == "__main__":

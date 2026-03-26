@@ -35,6 +35,7 @@ class EchoShell:
         text = Text()
         text.append("Echo Control Plane\n", style="bold bright_cyan")
         text.append(f"repo {self.project_root.name}  ", style="white")
+        text.append(f"branch {status.get('branch', 'none')}  ", style="green")
         text.append(f"profile {status['profile']}  ", style="white")
         text.append(f"backend {status['backend']}  ", style="bold white")
         text.append(f"model {status['model']}  ", style="white")
@@ -72,9 +73,11 @@ class EchoShell:
         text.append("/plan  ", style="cyan")
         text.append("/resume  ", style="cyan")
         text.append("/memory  ", style="cyan")
+        text.append("/branch  ", style="cyan")
         text.append("/status  ", style="cyan")
         text.append("/exit", style="cyan")
         text.append("\n")
+        text.append(f"branch {status.get('branch', 'none')}  ", style="green")
         text.append(f"session {status['session']}  ", style="white")
         text.append(f"context free {status['context_free']}", style="green")
         return Panel(text, title="Estado", border_style="bright_black")
@@ -167,8 +170,11 @@ class EchoShell:
 
         def worker() -> None:
             try:
-                resume_session_id = self.agent.last_session_id if mode in {"ask", "plan", "resume"} else None
-                answer, session_path, session = self.agent.run(prompt_text, mode=mode, resume_session_id=resume_session_id)
+                active = self.agent.store.active_branch()
+                branch_name = active.branch_name if active else None
+                answer, session_path, session = self.agent.run(
+                    prompt_text, mode=mode, branch_name=branch_name
+                )
                 holder["answer"] = answer
                 holder["session_path"] = session_path
                 holder["tool_calls"] = len(session.tool_calls)
@@ -202,9 +208,65 @@ class EchoShell:
             self.console.print(f"Sesión guardada en: {holder['session_path']}")
             self.console.print(f"Herramientas usadas: {holder.get('tool_calls', 0)}")
 
+    def _handle_branch_command(self, text: str) -> None:
+        """Handle /branch sub-commands inside the shell."""
+        parts = text.split(maxsplit=2)
+        sub = parts[1] if len(parts) > 1 else "status"
+        arg = parts[2] if len(parts) > 2 else ""
+
+        store = self.agent.store
+        active = store.ensure_branch_model()
+
+        if sub == "status":
+            branch = store.load_branch(active.branch_name)
+            lines = [f"active: {active.branch_name}"]
+            if branch:
+                lines.append(f"head_session: {branch.head_session_id or 'none'}")
+                lines.append(f"parent: {branch.parent_branch or '—'}")
+            self.console.print(Panel("\n".join(lines), title="Branch status", expand=False))
+
+        elif sub == "list":
+            branches = store.list_branches()
+            lines = []
+            for b in branches:
+                marker = "* " if b.name == active.branch_name else "  "
+                lines.append(f"{marker}{b.name}  head={b.head_session_id or 'none'}  parent={b.parent_branch or '—'}")
+            self.console.print(Panel("\n".join(lines) or "No branches.", title="Branches", expand=False))
+
+        elif sub == "new" and arg:
+            name = arg.strip()
+            if store.load_branch(name):
+                self.console.print(f"[red]Branch '{name}' already exists.[/red]")
+                return
+            source = store.load_branch(active.branch_name)
+            fork_head = source.head_session_id if source else ""
+            from echo.types import BranchMeta
+            new_branch = BranchMeta(
+                name=name,
+                head_session_id=fork_head,
+                parent_branch=active.branch_name,
+                fork_session_id=fork_head,
+            )
+            store.save_branch(new_branch)
+            store.set_active_branch(name)
+            self.console.print(f"[green]Branch '{name}' created and activated.[/green]")
+
+        elif sub == "switch" and arg:
+            name = arg.strip()
+            if store.load_branch(name) is None:
+                self.console.print(f"[red]Branch '{name}' not found.[/red]")
+                return
+            store.set_active_branch(name)
+            self.console.print(f"[green]Switched to branch '{name}'.[/green]")
+
+        else:
+            self.console.print(
+                "/branch status | /branch list | /branch new <name> | /branch switch <name>"
+            )
+
     def run(self) -> None:
         self.console.print(self._header())
-        self.console.print("/doctor, /ask <texto>, /plan <texto>, /resume [texto], /memory, /status, /exit")
+        self.console.print("/doctor, /ask <texto>, /plan <texto>, /resume [texto], /memory, /branch, /status, /exit")
         while True:
             text = self._multiline_input()
             if text is None:
@@ -216,6 +278,9 @@ class EchoShell:
             if text in {"/exit", "exit", "quit"}:
                 self.console.print("Saliendo.")
                 break
+            if text.startswith("/branch"):
+                self._handle_branch_command(text)
+                continue
             if text == "/doctor":
                 data = self.agent.doctor()
                 table = Table(title="Echo doctor")

@@ -128,6 +128,25 @@ class ColdMemory:
 
 
 @dataclass(slots=True)
+class BranchMeta:
+    """Persistent metadata for a named conversation branch."""
+    name: str
+    head_session_id: str
+    parent_branch: str = ""
+    fork_session_id: str = ""
+    description: str = ""
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class BranchState:
+    """Active branch pointer persisted per project."""
+    branch_name: str
+    updated_at: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
 class PlanStage:
     stage_id: str
     objective: str
@@ -173,6 +192,7 @@ class SessionState:
     cold_memory: ColdMemory = field(default_factory=ColdMemory)
     errors: list[str] = field(default_factory=list)
     parent_session_id: str = ""
+    branch_name: str = ""
     grounded_answer: bool = False
     grounding_report: dict[str, Any] = field(default_factory=dict)
     routing: dict[str, Any] = field(default_factory=dict)
