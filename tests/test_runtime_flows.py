@@ -599,6 +599,12 @@ class RuntimeFlowTests(unittest.TestCase):
         self.assertEqual(trace["backend_requests"][0]["outcome"], "timeout")
         self.assertEqual(trace["backend_requests"][-1]["outcome"], "response")
         self.assertGreaterEqual(trace["backend_requests"][-1]["timeout_seconds"], 1)
+        self.assertFalse(trace["backend_requests"][0]["includes_repo_map"])
+        self.assertTrue(trace["backend_requests"][0]["includes_focus_snippets"])
+        self.assertGreaterEqual(trace["backend_requests"][0]["system_messages"], 2)
+        self.assertGreaterEqual(trace["backend_requests"][0]["total_chars"], 1)
+        self.assertTrue(trace["backend_requests"][-1]["compressed_context"])
+        self.assertFalse(trace["backend_requests"][0]["resumed_context"])
 
     def test_runtime_trace_records_preflight_decision_detail_before_degraded_outcome(self) -> None:
         runtime, store = self._runtime(UnreachableBackend([]))
@@ -621,6 +627,38 @@ class RuntimeFlowTests(unittest.TestCase):
         self.assertIn("validation passed", phases["verify"]["detail"])
         self.assertTrue(session.validation)
         self.assertIn("python3 -m unittest discover -s tests -p test_*.py", session.validation[-1])
+
+    def test_resume_request_trace_marks_resumed_context(self) -> None:
+        backend = FakeBackend([{"message": {"content": "Revisé echo/sample.py, la función run y tests/test_sample.py. La validación correcta es unittest."}}])
+        runtime, store = self._runtime(backend)
+        _, _, session, _ = runtime.run("analiza echo/sample.py", mode="ask")
+        store.save_session(session)
+        resumed_backend = FakeBackend(
+            [
+                {"message": {"content": "Revisé echo/sample.py, la función run y tests/test_sample.py. La validación correcta es unittest."}},
+                {"message": {"content": "Revisé echo/sample.py, la función run y tests/test_sample.py. La validación correcta es unittest."}},
+            ]
+        )
+        resumed_runtime, _ = self._runtime(resumed_backend)
+        _, _, resumed_session, _ = resumed_runtime.run("continúa con echo/sample.py", mode="resume", resume_session_id=session.id)
+        request = resumed_session.runtime_trace["backend_requests"][-1]
+        self.assertTrue(request["resumed_context"])
+        self.assertGreaterEqual(request["message_count"], 2)
+
+    def test_simple_explicit_ask_slims_initial_request_shape(self) -> None:
+        backend = FakeBackend(
+            [
+                {"message": {"content": "Revisé echo/sample.py y tests/test_sample.py. La validación correcta es unittest."}},
+                {"message": {"content": "Revisé echo/sample.py y tests/test_sample.py. La validación correcta es unittest."}},
+            ]
+        )
+        runtime, _ = self._runtime(backend)
+        _, _, session, _ = runtime.run("Inspecciona README.md y echo/sample.py. Di qué archivo define run.", mode="ask")
+        initial_request = session.runtime_trace["backend_requests"][0]
+        self.assertFalse(initial_request["includes_repo_map"])
+        self.assertFalse(initial_request["resumed_context"])
+        self.assertLessEqual(initial_request["system_messages"], 4)
+        self.assertLess(initial_request["total_chars"], 5000)
 
     def test_long_session_can_continue_from_memory_layers(self) -> None:
         backend = FakeBackend([{"message": {"content": "Revisé echo/sample.py, la función run y tests/test_sample.py. La validación correcta es unittest."}}])

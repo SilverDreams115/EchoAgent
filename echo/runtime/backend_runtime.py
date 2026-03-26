@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from echo.backends import BackendAvailabilityPolicy, backend_log_state, quick_health_probe
 from echo.backends.errors import BackendError, BackendTimeoutError, BackendUnreachableError
+from echo.runtime.request_shape import describe_request_shape
 from echo.types import BackendHealth, RunState
 
 
@@ -44,6 +45,7 @@ def perform_backend_request(
     timeout_seconds: int,
     record_backend_request: Callable[..., None],
 ) -> dict[str, Any]:
+    shape = describe_request_shape(messages)
     previous = getattr(backend, "timeout", None)
     if previous is not None:
         backend.timeout = timeout_seconds
@@ -81,9 +83,18 @@ def perform_backend_request(
         )
         record_backend_request(
             run_state,
-            message_count=len(messages),
+            message_count=shape.message_count,
             timeout_seconds=timeout_seconds,
             tools_enabled=bool(tools),
+            total_chars=shape.total_chars,
+            system_messages=shape.system_messages,
+            user_messages=shape.user_messages,
+            assistant_messages=shape.assistant_messages,
+            tool_messages=shape.tool_messages,
+            includes_repo_map=shape.includes_repo_map,
+            includes_focus_snippets=shape.includes_focus_snippets,
+            compressed_context=shape.compressed_context,
+            resumed_context=shape.resumed_context,
             duration_ms=duration_ms,
             outcome="timeout",
             detail=str(exc),
@@ -117,9 +128,18 @@ def perform_backend_request(
         )
         record_backend_request(
             run_state,
-            message_count=len(messages),
+            message_count=shape.message_count,
             timeout_seconds=timeout_seconds,
             tools_enabled=bool(tools),
+            total_chars=shape.total_chars,
+            system_messages=shape.system_messages,
+            user_messages=shape.user_messages,
+            assistant_messages=shape.assistant_messages,
+            tool_messages=shape.tool_messages,
+            includes_repo_map=shape.includes_repo_map,
+            includes_focus_snippets=shape.includes_focus_snippets,
+            compressed_context=shape.compressed_context,
+            resumed_context=shape.resumed_context,
             duration_ms=duration_ms,
             outcome="unreachable" if isinstance(exc, BackendUnreachableError) else "error",
             detail=exc.detail or str(exc),
@@ -155,9 +175,18 @@ def perform_backend_request(
     )
     record_backend_request(
         run_state,
-        message_count=len(messages),
+        message_count=shape.message_count,
         timeout_seconds=timeout_seconds,
         tools_enabled=bool(tools),
+        total_chars=shape.total_chars,
+        system_messages=shape.system_messages,
+        user_messages=shape.user_messages,
+        assistant_messages=shape.assistant_messages,
+        tool_messages=shape.tool_messages,
+        includes_repo_map=shape.includes_repo_map,
+        includes_focus_snippets=shape.includes_focus_snippets,
+        compressed_context=shape.compressed_context,
+        resumed_context=shape.resumed_context,
         duration_ms=duration_ms,
         outcome="slow" if run_state.backend_health.backend_chat_slow else "response",
         detail=run_state.backend_health.backend_state,

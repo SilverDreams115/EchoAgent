@@ -101,6 +101,7 @@ echocode smoke "diagnóstico breve del backend actual"
 - Final answer grounding rejects unsupported file, symbol, command, change, and validation claims.
 - Shell execution is constrained to a safe policy: no shell metacharacters, no `shell=True`, and no destructive executables.
 - Session artifacts persist a `runtime_trace` with phase timings, backend request outcomes, retry count, grounding outcome, and remaining time budget.
+- Simple `ask` requests that target one or two explicit files are slimmed before backend dispatch: fewer snippet lines, no repo map, and no extra tool/stage guidance when that context would only add latency.
 
 ## Execution Model
 
@@ -136,7 +137,8 @@ Echo persists compact operational memory instead of replaying the whole transcri
 Each persisted session keeps a compact runtime trace so slow or degraded runs stay auditable without replaying the full transcript.
 
 - high-level phases: `prepare`, `preflight`, `execute`, `verify`, `finalize`
-- backend request trace: message count, effective timeout, tools enabled, request duration, outcome
+- backend request trace: message count, role counts, effective timeout, tools enabled, request duration, outcome
+- request-shape fields: total chars, repo-map included or omitted, focus snippets present, compressed context, resumed context
 - final runtime outcome: retry count, degraded vs grounded, remaining budget, terminal reason
 
 This trace is written both into the session JSON and the runtime artifact under `.echo/artifacts/`.

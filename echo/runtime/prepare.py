@@ -15,6 +15,58 @@ class PreflightDecision:
     detail: str = ""
 
 
+@dataclass(slots=True)
+class IntakeShape:
+    snippet_line_limit: int
+    include_repo_map: bool = True
+    include_tools_guide: bool = True
+    include_stage_guidance: bool = True
+    detail: str = "standard"
+
+
+def choose_intake_shape(
+    *,
+    mode: str,
+    prompt: str,
+    focus_files: list[str],
+    snippet_line_limit: int,
+    backend_native_tools_enabled: bool,
+) -> IntakeShape:
+    shape = IntakeShape(
+        snippet_line_limit=snippet_line_limit,
+        include_repo_map=True,
+        include_tools_guide=not backend_native_tools_enabled,
+        include_stage_guidance=True,
+        detail="standard",
+    )
+    low = (prompt or "").lower()
+    explicit_file_prompt = any(token in low for token in [".py", ".md", ".toml", ".json", ".yml", ".yaml"])
+    mutating_or_broad = any(
+        token in low
+        for token in [
+            "cambi",
+            "modific",
+            "edit",
+            "patch",
+            "fix",
+            "refactor",
+            "implement",
+            "plan",
+            "ejecut",
+            "run ",
+            "shell",
+            "comando",
+        ]
+    )
+    if mode == "ask" and explicit_file_prompt and len(focus_files) <= 2 and not mutating_or_broad:
+        shape.snippet_line_limit = min(snippet_line_limit, 24)
+        shape.include_repo_map = False
+        shape.include_tools_guide = False
+        shape.include_stage_guidance = False
+        shape.detail = "slim-explicit-ask"
+    return shape
+
+
 def resume_seed(
     *,
     loaded: SessionState,
@@ -80,6 +132,8 @@ def seed_inspection(
     repo_limit: int,
     file_limit: int,
     snippet_line_limit: int,
+    mode: str,
+    backend_native_tools_enabled: bool,
     build_repo_map,
     select_relevant_files,
     tools_execute,
@@ -93,18 +147,25 @@ def seed_inspection(
     list_result = tools_execute("list_files", {"path": "", "max_depth": 2})
     record_tool_call(session, run_state, "list_files", {"path": "", "max_depth": 2}, list_result)
     focus_files = select_relevant_files(project_root, prompt, limit=file_limit)
+    shape = choose_intake_shape(
+        mode=mode,
+        prompt=prompt,
+        focus_files=focus_files,
+        snippet_line_limit=snippet_line_limit,
+        backend_native_tools_enabled=backend_native_tools_enabled,
+    )
     snippets: list[str] = []
     for rel in focus_files:
         read_result = tools_execute("read_file", {"path": rel})
         record_tool_call(session, run_state, "read_file", {"path": rel}, read_result)
         content = str(read_result.get("content", ""))
-        snippet = "\n".join(content.splitlines()[:snippet_line_limit])
+        snippet = "\n".join(content.splitlines()[: shape.snippet_line_limit])
         snippets.append(f"FILE: {rel}\n{snippet}")
     run_state.focus_files = list(dict.fromkeys(run_state.focus_files + focus_files))
     session.focus_files = list(dict.fromkeys(session.focus_files + focus_files))
     session.working_set = list(dict.fromkeys(session.working_set + focus_files))
     mark_phase(run_state, "Inspector", "done", f"Selected focus files={len(focus_files)}")
-    return repo_map, snippets
+    return repo_map, snippets, shape
 
 
 def build_intake_messages(
@@ -113,20 +174,21 @@ def build_intake_messages(
     constraints: list[str],
     repo_map: list[str],
     focus_snippets: list[str],
-    backend_native_tools_enabled: bool,
     compatibility_guide: str,
     stage_guidance: dict[str, str] | None,
+    shape: IntakeShape,
 ) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {"role": "system", "content": "Constraints:\n- " + "\n- ".join(constraints)},
-        {"role": "system", "content": "Repo map:\n" + "\n".join(repo_map)},
     ]
+    if shape.include_repo_map:
+        messages.append({"role": "system", "content": "Repo map:\n" + "\n".join(repo_map)})
     if focus_snippets:
         messages.append({"role": "system", "content": "Focus snippets:\n\n" + "\n\n".join(focus_snippets)})
-    if not backend_native_tools_enabled:
+    if shape.include_tools_guide:
         messages.append({"role": "system", "content": compatibility_guide})
-    if stage_guidance is not None:
+    if shape.include_stage_guidance and stage_guidance is not None:
         messages.append(stage_guidance)
     return messages
 

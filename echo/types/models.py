@@ -222,6 +222,15 @@ class BackendRequestTrace:
     message_count: int = 0
     timeout_seconds: int = 0
     tools_enabled: bool = False
+    total_chars: int = 0
+    system_messages: int = 0
+    user_messages: int = 0
+    assistant_messages: int = 0
+    tool_messages: int = 0
+    includes_repo_map: bool = False
+    includes_focus_snippets: bool = False
+    compressed_context: bool = False
+    resumed_context: bool = False
     duration_ms: int = 0
     outcome: str = "unknown"
     detail: str = ""

@@ -248,7 +248,7 @@ class AgentRuntime:
                 current_stage.evidence = list(dict.fromkeys(current_stage.evidence + evidence))
                 current_stage.updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-    def _seed_inspection(self, session: SessionState, run_state: RunState, prompt: str) -> tuple[list[str], list[str]]:
+    def _seed_inspection(self, session: SessionState, run_state: RunState, prompt: str) -> tuple[list[str], list[str], Any]:
         repo_limit, file_limit, snippet_line_limit = self._intake_limits()
         return seed_inspection(
             project_root=self.project_root,
@@ -256,6 +256,8 @@ class AgentRuntime:
             repo_limit=repo_limit,
             file_limit=file_limit,
             snippet_line_limit=snippet_line_limit,
+            mode=session.mode,
+            backend_native_tools_enabled=self._backend_native_tools_enabled(),
             build_repo_map=build_repo_map,
             select_relevant_files=select_relevant_files,
             tools_execute=self.tools.execute,
@@ -267,7 +269,7 @@ class AgentRuntime:
 
     def _intake(self, session: SessionState, run_state: RunState, prompt: str) -> list[dict[str, Any]]:
         self._mark_phase(run_state, "Intake", "running", "Analizando objetivo y restricciones")
-        repo_map, focus_snippets = self._seed_inspection(session, run_state, prompt)
+        repo_map, focus_snippets, intake_shape = self._seed_inspection(session, run_state, prompt)
         self._initialize_plan(session, run_state, prompt)
         inspect_stage = self._find_stage(run_state, "inspect")
         if inspect_stage is not None:
@@ -284,13 +286,13 @@ class AgentRuntime:
             constraints=run_state.constraints,
             repo_map=repo_map,
             focus_snippets=focus_snippets,
-            backend_native_tools_enabled=self._backend_native_tools_enabled(),
             compatibility_guide=self.tools.compatibility_guide(),
             stage_guidance=self._plan_guidance_message(run_state),
+            shape=intake_shape,
         )
         self._sync_memory_layers(session, run_state)
         session.messages.extend(messages)
-        self._mark_phase(run_state, "Intake", "done", "Intake completed")
+        self._mark_phase(run_state, "Intake", "done", f"Intake completed mode={intake_shape.detail}")
         return messages
 
     def _resume_seed(self, loaded: SessionState, prompt: str, mode: str) -> SessionState:
