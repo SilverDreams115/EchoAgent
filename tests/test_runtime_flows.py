@@ -2,22 +2,27 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from echo.backends.errors import BackendMalformedResponseError, BackendTimeoutError, BackendUnreachableError
 from echo.backends.availability import BackendAvailabilityPolicy, run_backend_check
-from echo.backends.health import effective_backend_health, normalize_backend_health
+from echo.backends.health import effective_backend_health, normalize_backend_health, rolling_backend_health_from_log
 from echo.cognition.planner import build_execution_plan
-from echo.cognition.validation import detect_validation_plan
+from echo.cognition.validation import detect_validation_plan, detect_validation_strategy
 from echo.cognition.verifier import evaluate_final_answer
 from echo.context.compressor import compress_messages_if_needed
+from echo.context.selector import select_relevant_files
 from echo.config import Settings
 from echo.core import EchoAgent
 from echo.memory import EchoStore
 from echo.runtime import ActivityBus, AgentRuntime
+from echo.runtime.budget import RuntimeBudget, build_runtime_budget
+from echo.runtime.outcomes import is_resume_summary_only
 from echo.tools import ToolRegistry
+from echo.tools.shell_policy import validate_shell_command
 from echo.types import ToolCallRecord
 
 try:
@@ -67,6 +72,17 @@ class MalformedOnceBackend(FakeBackend):
         if self.calls == 1:
             raise BackendMalformedResponseError("respuesta inválida", backend="fake", model="fake-model")
         return self.responses.pop(0)
+
+
+class SlowTimeoutBackend(FakeBackend):
+    def __init__(self, delay_seconds: float = 1.1) -> None:
+        super().__init__([])
+        self.delay_seconds = delay_seconds
+
+    def chat(self, messages, tools=None):
+        self.calls += 1
+        time.sleep(self.delay_seconds)
+        raise BackendTimeoutError("timeout", backend="fake", model="fake-model")
 
 
 class RuntimeFlowTests(unittest.TestCase):
@@ -160,6 +176,11 @@ class RuntimeFlowTests(unittest.TestCase):
         self.assertEqual(plan.strategy, "pytest")
         self.assertEqual(plan.command, "python3 -m pytest")
 
+    def test_detect_validation_plan_ignores_incidental_pytest_text_in_pyproject(self) -> None:
+        (self.root / "pyproject.toml").write_text('[project]\nname = "demo"\ndependencies = ["pytest"]\n', encoding="utf-8")
+        plan = detect_validation_plan(self.root)
+        self.assertEqual(plan.strategy, "unittest")
+
     def test_execution_plan_has_required_stage_fields(self) -> None:
         stages = build_execution_plan("analiza echo/sample.py", mode="ask", focus_files=["echo/sample.py"], validation_strategy="unittest")
         self.assertGreaterEqual(len(stages), 3)
@@ -210,6 +231,23 @@ class RuntimeFlowTests(unittest.TestCase):
         self.assertEqual(plan.strategy, "unknown")
         self.assertEqual(plan.command, "")
 
+    def test_detect_validation_plan_uses_typecheck_as_last_safe_js_fallback(self) -> None:
+        for item in (self.root / "tests").glob("*"):
+            item.unlink()
+        (self.root / "tests").rmdir()
+        for item in (self.root / "echo").glob("*"):
+            item.unlink()
+        (self.root / "echo").rmdir()
+        (self.root / "yarn.lock").write_text("", encoding="utf-8")
+        (self.root / "package.json").write_text(json.dumps({"scripts": {"typecheck": "tsc --noEmit"}}), encoding="utf-8")
+        plan = detect_validation_plan(self.root)
+        self.assertEqual(plan.strategy, "yarn-typecheck")
+        self.assertEqual(plan.command, "yarn typecheck")
+
+    def test_detect_validation_strategy_from_evidence_uses_commands_not_python_file_presence(self) -> None:
+        strategy = detect_validation_strategy(project_files=["echo/sample.py"], validation_commands=["python3 -m unittest discover -s tests -p test_*.py"])
+        self.assertEqual(strategy, "unittest")
+
     def test_validate_project_returns_unknown_without_safe_strategy(self) -> None:
         for item in (self.root / "tests").glob("*"):
             item.unlink()
@@ -236,6 +274,17 @@ class RuntimeFlowTests(unittest.TestCase):
         self.assertEqual(report.grounded_file_count, 1)
         self.assertEqual(report.grounded_symbol_count, 0)
 
+    def test_answer_validator_reports_missing_inspected_file_reason_stably(self) -> None:
+        report = evaluate_final_answer(
+            "La lógica principal está bien estructurada.",
+            inspected_files=["echo/sample.py"],
+            tool_result_previews=['{"path":"echo/sample.py","content":"def run():\\n    return \\"ok\\""}'],
+            working_set=["echo/sample.py"],
+            validation_strategy="unittest",
+        )
+        self.assertFalse(report.valid)
+        self.assertEqual(report.reason, "Respuesta no grounded: no menciona archivos inspeccionados.")
+
     def test_answer_validator_rejects_unread_file_claim(self) -> None:
         report = evaluate_final_answer(
             "Revisé echo/other.py y confirmé el cambio.",
@@ -259,6 +308,68 @@ class RuntimeFlowTests(unittest.TestCase):
         )
         self.assertFalse(report.valid)
         self.assertIn("missing_symbol", report.unsupported_symbols)
+
+    def test_answer_validator_does_not_treat_plain_backend_value_as_symbol(self) -> None:
+        report = evaluate_final_answer(
+            "Revisé echo/config.py y la clase Settings. El backend por defecto es `ollama`.",
+            inspected_files=["echo/config.py"],
+            tool_result_previews=['{"path":"echo/config.py","content":"class Settings:\\n    backend = \\"ollama\\"\\n"}'],
+            tool_calls=[self._tool_call("read_file", {"path": "echo/config.py"}, {"path": "echo/config.py", "content": "class Settings:\n    backend = \"ollama\"\n"})],
+            working_set=["echo/config.py"],
+            validation_strategy="unittest",
+        )
+        self.assertNotIn("ollama", report.unsupported_symbols)
+        self.assertTrue(report.valid)
+
+    def test_answer_validator_accepts_env_symbols_when_present_in_evidence(self) -> None:
+        report = evaluate_final_answer(
+            "Revisé echo/config.py y el método from_env. Ahí `ECHO_BACKEND` cae a `ollama` y `ECHO_MODEL` cae a `qwen2.5-coder:7b-oh`.",
+            inspected_files=["echo/config.py"],
+            tool_result_previews=[
+                '{"path":"echo/config.py","content":"class Settings:\\n    @classmethod\\n    def from_env(cls):\\n        backend=os.getenv(\\"ECHO_BACKEND\\", \\"ollama\\")\\n        model=os.getenv(\\"ECHO_MODEL\\", os.getenv(\\"MINI_AGENT_MODEL\\", \\"qwen2.5-coder:7b-oh\\"))\\n"}'
+            ],
+            tool_calls=[
+                self._tool_call(
+                    "read_file",
+                    {"path": "echo/config.py"},
+                    {
+                        "path": "echo/config.py",
+                        "content": 'class Settings:\n    @classmethod\n    def from_env(cls):\n        backend=os.getenv("ECHO_BACKEND", "ollama")\n        model=os.getenv("ECHO_MODEL", os.getenv("MINI_AGENT_MODEL", "qwen2.5-coder:7b-oh"))\n',
+                    },
+                )
+            ],
+            working_set=["echo/config.py"],
+            validation_strategy="unittest",
+        )
+        self.assertTrue(report.valid)
+        self.assertGreaterEqual(report.grounded_symbol_count, 2)
+        self.assertEqual(report.unsupported_symbols, [])
+
+    def test_answer_validator_accepts_field_identifier_when_present_in_evidence(self) -> None:
+        report = evaluate_final_answer(
+            "Revisé echo/config.py y la clase Settings. El campo `openai_api_key` existe en esa configuración.",
+            inspected_files=["echo/config.py"],
+            tool_result_previews=[
+                '{"path":"echo/config.py","content":"class Settings:\\n    openai_api_key: str = \\"\\"\\n    backend_timeout: int = 120\\n"}'
+            ],
+            tool_calls=[
+                self._tool_call(
+                    "read_file",
+                    {"path": "echo/config.py"},
+                    {"path": "echo/config.py", "content": 'class Settings:\n    openai_api_key: str = ""\n    backend_timeout: int = 120\n'},
+                )
+            ],
+            working_set=["echo/config.py"],
+            validation_strategy="unittest",
+        )
+        self.assertTrue(report.valid)
+        self.assertGreaterEqual(report.grounded_symbol_count, 1)
+        self.assertEqual(report.unsupported_symbols, [])
+
+    def test_select_relevant_files_prioritizes_explicit_path_with_punctuation(self) -> None:
+        files = select_relevant_files(self.root, "Inspecciona README.md y echo/sample.py. Resume backend.", limit=4)
+        self.assertEqual(set(files), {"README.md", "echo/sample.py"})
+        self.assertEqual(len(files), 2)
 
     def test_answer_validator_rejects_validation_claim_without_executed_command(self) -> None:
         report = evaluate_final_answer(
@@ -341,6 +452,25 @@ class RuntimeFlowTests(unittest.TestCase):
         self.assertTrue(run_state.grounding_report.valid)
         self.assertGreaterEqual(session.retry_count, 1)
 
+    def test_runtime_budget_uses_backend_timeout_as_total_deadline_with_reserve(self) -> None:
+        self.settings.backend_timeout = 5
+        self.settings.backend_preflight_timeout = 2
+        budget = build_runtime_budget(self.settings)
+        self.assertEqual(budget.total_ms, 5000)
+        self.assertEqual(budget.reserve_ms, 4000)
+        self.assertGreaterEqual(budget.deadline_ms, budget.total_ms)
+
+    def test_timeout_degrades_without_retry_when_budget_is_exhausted(self) -> None:
+        self.settings.backend_timeout = 1
+        self.settings.backend_preflight_timeout = 1
+        backend = SlowTimeoutBackend(delay_seconds=1.05)
+        runtime, _ = self._runtime(backend)
+        answer, _, session, run_state = runtime.run("inspecciona echo/sample.py y responde", mode="ask")
+        self.assertEqual(backend.calls, 1)
+        self.assertIn("timeout", answer.lower())
+        self.assertEqual(run_state.retry_count, 0)
+        self.assertTrue(session.degraded_reason)
+
     def test_resume_returns_restored_state_without_backend(self) -> None:
         backend = FakeBackend([{"message": {"content": "Revisé echo/sample.py, la función run y tests/test_sample.py. La validación correcta es unittest."}}])
         runtime, store = self._runtime(backend)
@@ -399,6 +529,27 @@ class RuntimeFlowTests(unittest.TestCase):
         self.assertIn("Current stage:", resumed_session.messages[1]["content"])
         self.assertIn("Working set:", resumed_session.messages[1]["content"])
 
+    def test_resume_summary_request_uses_local_memory_without_backend_roundtrip(self) -> None:
+        backend = FakeBackend([{"message": {"content": "Revisé echo/sample.py, la función run y tests/test_sample.py. La validación correcta es unittest."}}])
+        runtime, store = self._runtime(backend)
+        _, _, session, _ = runtime.run("analiza echo/sample.py", mode="ask")
+        store.save_session(session)
+        resumed_backend = FakeBackend([{"message": {"content": "esto no debería usarse"}}])
+        resumed_runtime, _ = self._runtime(resumed_backend)
+        answer, _, resumed_session, _ = resumed_runtime.run(
+            "Continúa desde la última sesión y resume objetivo, working set y pendientes.",
+            mode="resume",
+            resume_session_id=session.id,
+        )
+        self.assertIn("Echo restauró la sesión desde memoria local.", answer)
+        self.assertIn("echo/sample.py", answer)
+        self.assertEqual(resumed_backend.calls, 0)
+        self.assertTrue(resumed_session.working_set)
+
+    def test_resume_summary_only_detector_requires_dense_resume_intent(self) -> None:
+        self.assertTrue(is_resume_summary_only("Continúa desde la última sesión y resume objetivo, working set y pendientes."))
+        self.assertFalse(is_resume_summary_only("Resume README.md"))
+
     def test_memory_layers_do_not_diverge_on_active_files(self) -> None:
         backend = FakeBackend([{"message": {"content": "Revisé echo/sample.py, la función run y tests/test_sample.py. La validación correcta es unittest."}}])
         runtime, _ = self._runtime(backend)
@@ -413,6 +564,63 @@ class RuntimeFlowTests(unittest.TestCase):
         self.assertIn("read_file", session.summary)
         if session.episodic_memory.validations:
             self.assertIn(session.episodic_memory.validations[-1], session.summary)
+
+    def test_finalize_persists_runtime_artifact_and_session_trace_after_degraded_run(self) -> None:
+        runtime, store = self._runtime(UnreachableBackend([]))
+        answer, session_path, session, _ = runtime.run("inspecciona echo/sample.py", mode="ask")
+        self.assertIn("no pudo cerrar con el backend", answer)
+        self.assertTrue(session_path.exists())
+        runtime_artifact = self.root / ".echo" / "artifacts" / f"{session.id}-runtime.json"
+        self.assertTrue(runtime_artifact.exists())
+        reloaded = store.load_session(session.id)
+        self.assertEqual(reloaded.id, session.id)
+        self.assertTrue(reloaded.artifacts)
+
+    def test_runtime_trace_records_phase_metrics_and_remaining_budget(self) -> None:
+        backend = TimeoutOnceBackend(
+            [
+                {"message": {"content": "Revisé echo/sample.py, la función run y tests/test_sample.py. La validación correcta es unittest."}},
+                {"message": {"content": "Revisé echo/sample.py, la función run y tests/test_sample.py. La validación correcta es unittest."}},
+            ]
+        )
+        runtime, _ = self._runtime(backend)
+        _, _, session, run_state = runtime.run("inspecciona echo/sample.py y responde", mode="ask")
+        trace = session.runtime_trace
+        self.assertEqual(trace["retry_count"], run_state.retry_count)
+        self.assertFalse(trace["degraded"])
+        self.assertTrue(trace["grounded"])
+        self.assertGreaterEqual(trace["budget_remaining_ms"], 0)
+        phases = {item["phase"]: item for item in trace["phases"]}
+        for phase in ["prepare", "preflight", "execute", "verify", "finalize"]:
+            self.assertIn(phase, phases)
+            self.assertGreaterEqual(phases[phase]["duration_ms"], 0)
+        self.assertIn("retries=", phases["execute"]["detail"])
+        self.assertGreaterEqual(len(trace["backend_requests"]), 2)
+        self.assertEqual(trace["backend_requests"][0]["outcome"], "timeout")
+        self.assertEqual(trace["backend_requests"][-1]["outcome"], "response")
+        self.assertGreaterEqual(trace["backend_requests"][-1]["timeout_seconds"], 1)
+
+    def test_runtime_trace_records_preflight_decision_detail_before_degraded_outcome(self) -> None:
+        runtime, store = self._runtime(UnreachableBackend([]))
+        self._mark_backend_unstable(store, event="error")
+        _, _, session, _ = runtime.run("inspecciona echo/sample.py", mode="ask")
+        trace = session.runtime_trace
+        self.assertTrue(trace["degraded"])
+        self.assertIn("backend caído", trace["outcome_reason"])
+        phases = {item["phase"]: item for item in trace["phases"]}
+        self.assertIn("preflight", phases)
+        self.assertEqual(phases["preflight"]["detail"], "backend reachable; chat unverified")
+
+    def test_auto_verify_handoff_updates_verify_phase_and_validation_commands(self) -> None:
+        self.settings.auto_verify = True
+        runtime, _ = self._runtime_with_shell(FakeBackend([{"message": {"content": "Revisé echo/sample.py, la función run y tests/test_sample.py. La validación correcta es unittest."}}]))
+        with patch("echo.runtime.engine.should_auto_verify", return_value=True):
+            _, _, session, _ = runtime.run("analiza echo/sample.py", mode="ask")
+        phases = {item["phase"]: item for item in session.runtime_trace["phases"]}
+        self.assertIn("verify", phases)
+        self.assertIn("validation passed", phases["verify"]["detail"])
+        self.assertTrue(session.validation)
+        self.assertIn("python3 -m unittest discover -s tests -p test_*.py", session.validation[-1])
 
     def test_long_session_can_continue_from_memory_layers(self) -> None:
         backend = FakeBackend([{"message": {"content": "Revisé echo/sample.py, la función run y tests/test_sample.py. La validación correcta es unittest."}}])
@@ -760,6 +968,10 @@ class RuntimeFlowTests(unittest.TestCase):
         self.assertEqual(result["policy_decision"], "blocked")
         self.assertIn("metacharacters", result["error"])
 
+    def test_shell_policy_allows_only_explicit_safe_prefixes(self) -> None:
+        self.assertTrue(validate_shell_command("python3 -m unittest discover -s tests -p test_*.py").allowed)
+        self.assertFalse(validate_shell_command("python3 script.py").allowed)
+
     def test_run_shell_rejects_unlisted_executable(self) -> None:
         runtime, _ = self._runtime_with_shell(FakeBackend([]))
         result = runtime.tools.execute("run_shell", {"command": "echo hello"})
@@ -785,6 +997,24 @@ class RuntimeFlowTests(unittest.TestCase):
         result = runtime.tools.execute("git_status", {})
         self.assertEqual(result["policy_decision"], "allowed")
         self.assertEqual(result["argv"][:2], ["git", "status"])
+
+    def test_rolling_backend_health_from_log_normalizes_latest_events(self) -> None:
+        log = self.root / ".echo" / "logs" / "backend.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(
+            "\n".join(
+                [
+                    json.dumps({"event": "tags_check", "backend_reachable": True, "backend_chat_ready": False, "backend_state": "reachable"}),
+                    json.dumps({"event": "chat_probe_timeout", "backend_reachable": True, "backend_chat_ready": False, "backend_chat_slow": True, "backend_state": "timeout", "duration_ms": 120000}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        health = rolling_backend_health_from_log(log)
+        self.assertTrue(health.backend_reachable)
+        self.assertFalse(health.backend_chat_ready)
+        self.assertEqual(health.backend_state, "timeout")
 
     def test_strict_deep_profile_still_requires_frontier_backend(self) -> None:
         settings = Settings.from_env()

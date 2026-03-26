@@ -177,6 +177,7 @@ class SessionState:
     grounding_report: dict[str, Any] = field(default_factory=dict)
     routing: dict[str, Any] = field(default_factory=dict)
     health: dict[str, Any] = field(default_factory=dict)
+    runtime_trace: dict[str, Any] = field(default_factory=dict)
     retry_count: int = 0
     compression_count: int = 0
     degraded_reason: str = ""
@@ -206,6 +207,35 @@ class PhaseRecord:
     status: str
     detail: str = ""
     created_at: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class RuntimePhaseTrace:
+    phase: str
+    status: str = "pending"
+    duration_ms: int = 0
+    detail: str = ""
+
+
+@dataclass(slots=True)
+class BackendRequestTrace:
+    message_count: int = 0
+    timeout_seconds: int = 0
+    tools_enabled: bool = False
+    duration_ms: int = 0
+    outcome: str = "unknown"
+    detail: str = ""
+
+
+@dataclass(slots=True)
+class RuntimeTrace:
+    phases: list[RuntimePhaseTrace] = field(default_factory=list)
+    backend_requests: list[BackendRequestTrace] = field(default_factory=list)
+    retry_count: int = 0
+    degraded: bool = False
+    grounded: bool = False
+    budget_remaining_ms: int = 0
+    outcome_reason: str = ""
 
 
 @dataclass(slots=True)
@@ -243,4 +273,8 @@ class RunState:
     grounding_report: GroundingReport = field(default_factory=GroundingReport)
     retry_count: int = 0
     compression_count: int = 0
+    runtime_budget_ms: int = 0
+    runtime_deadline_ms: int = 0
+    runtime_reserve_ms: int = 0
+    runtime_trace: RuntimeTrace = field(default_factory=RuntimeTrace)
     artifacts: list[RuntimeArtifact] = field(default_factory=list)

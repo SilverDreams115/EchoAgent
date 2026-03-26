@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 
 VALIDATION_STRATEGIES = {
@@ -16,6 +17,7 @@ VALIDATION_STRATEGIES = {
     "yarn-lint",
     "npm-run-typecheck",
     "pnpm-run-typecheck",
+    "yarn-typecheck",
     "compileall",
     "unknown",
 }
@@ -35,25 +37,84 @@ def _read_json(path: Path) -> dict[str, object]:
         return {}
 
 
-def detect_validation_plan(project_root: Path) -> ValidationPlan:
-    pyproject = project_root / "pyproject.toml"
-    pytest_ini = project_root / "pytest.ini"
-    conftest = project_root / "conftest.py"
-    tests_dir = project_root / "tests"
-    package_json = project_root / "package.json"
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
 
-    pyproject_text = pyproject.read_text(encoding="utf-8") if pyproject.exists() else ""
-    has_pytest_config = pytest_ini.exists() or conftest.exists() or "[tool.pytest" in pyproject_text or "pytest" in pyproject_text
-    has_unittest_tests = tests_dir.exists() and any(tests_dir.rglob("test_*.py"))
+
+def _has_pytest_configuration(project_root: Path) -> tuple[bool, str]:
+    if (project_root / "pytest.ini").exists():
+        return True, "pytest.ini present"
+    if (project_root / "conftest.py").exists():
+        return True, "conftest.py present"
+    if re.search(r"(?m)^\s*\[pytest\]\s*$", _read_text(project_root / "tox.ini")):
+        return True, "tox.ini pytest section present"
+    if re.search(r"(?m)^\s*\[tool:pytest\]\s*$", _read_text(project_root / "setup.cfg")):
+        return True, "setup.cfg tool:pytest section present"
+    if re.search(r"(?m)^\s*\[tool\.pytest(?:\.ini_options)?\]\s*$", _read_text(project_root / "pyproject.toml")):
+        return True, "pyproject pytest section present"
+    return False, ""
+
+
+def _python_test_layout(project_root: Path) -> tuple[bool, str]:
+    tests_dir = project_root / "tests"
+    if not tests_dir.exists():
+        return False, ""
+    if any(tests_dir.rglob("test_*.py")):
+        return True, "tests/test_*.py layout detected"
+    if any(tests_dir.rglob("*_test.py")):
+        return True, "tests/*_test.py layout detected"
+    return False, ""
+
+
+def infer_validation_strategy_from_evidence(*, project_files: list[str] | None = None, validation_commands: list[str] | None = None) -> str:
+    commands = " ".join(validation_commands or []).lower()
+    files = [item.lower() for item in (project_files or [])]
+    if "python -m pytest" in commands or "python3 -m pytest" in commands or re.search(r"(^|\s)pytest(\s|$)", commands):
+        return "pytest"
+    if "python -m unittest" in commands or "python3 -m unittest" in commands or "unittest" in commands:
+        return "unittest"
+    if "npm test" in commands:
+        return "npm-test"
+    if "pnpm test" in commands:
+        return "pnpm-test"
+    if "yarn test" in commands:
+        return "yarn-test"
+    if "npm run lint" in commands:
+        return "npm-run-lint"
+    if "pnpm run lint" in commands:
+        return "pnpm-run-lint"
+    if "yarn lint" in commands:
+        return "yarn-lint"
+    if "npm run typecheck" in commands:
+        return "npm-run-typecheck"
+    if "pnpm run typecheck" in commands:
+        return "pnpm-run-typecheck"
+    if "yarn typecheck" in commands:
+        return "yarn-typecheck"
+    if "compileall" in commands:
+        return "compileall"
+    if any(item.endswith(".py") for item in files):
+        return "unknown"
+    return "unknown"
+
+
+def detect_validation_plan(project_root: Path) -> ValidationPlan:
+    package_json = project_root / "package.json"
     has_python = any(project_root.rglob("*.py"))
 
+    has_pytest_config, pytest_reason = _has_pytest_configuration(project_root)
     if has_pytest_config:
-        return ValidationPlan(strategy="pytest", command="python3 -m pytest", reason="pytest config or layout detected")
+        return ValidationPlan(strategy="pytest", command="python3 -m pytest", reason=pytest_reason)
+
+    has_unittest_tests, unittest_reason = _python_test_layout(project_root)
     if has_unittest_tests:
         return ValidationPlan(
             strategy="unittest",
             command="python3 -m unittest discover -s tests -p test_*.py",
-            reason="unittest-style tests detected",
+            reason=unittest_reason,
         )
 
     if package_json.exists():
@@ -75,13 +136,23 @@ def detect_validation_plan(project_root: Path) -> ValidationPlan:
                 elif (project_root / "yarn.lock").exists():
                     manager = "yarn"
                 command = {"npm": "npm run lint", "pnpm": "pnpm run lint", "yarn": "yarn lint"}[manager]
-                return ValidationPlan(strategy=f"{manager}-run-lint" if manager != "yarn" else "yarn-lint", command=command, reason="package.json lint script detected")
+                return ValidationPlan(
+                    strategy=f"{manager}-run-lint" if manager != "yarn" else "yarn-lint",
+                    command=command,
+                    reason="package.json lint script detected and no safer test runner was detected",
+                )
             if "typecheck" in scripts:
                 manager = "npm"
                 if (project_root / "pnpm-lock.yaml").exists():
                     manager = "pnpm"
-                command = {"npm": "npm run typecheck", "pnpm": "pnpm run typecheck"}[manager]
-                return ValidationPlan(strategy=f"{manager}-run-typecheck", command=command, reason="package.json typecheck script detected")
+                elif (project_root / "yarn.lock").exists():
+                    manager = "yarn"
+                command = {"npm": "npm run typecheck", "pnpm": "pnpm run typecheck", "yarn": "yarn typecheck"}[manager]
+                return ValidationPlan(
+                    strategy=f"{manager}-run-typecheck" if manager != "yarn" else "yarn-typecheck",
+                    command=command,
+                    reason="package.json typecheck script detected and no safer test runner was detected",
+                )
         return ValidationPlan(strategy="unknown", command="", reason="package.json detected but no safe validation script found")
 
     if has_python:
@@ -91,5 +162,11 @@ def detect_validation_plan(project_root: Path) -> ValidationPlan:
     return ValidationPlan(strategy="unknown", command="", reason="no supported validation strategy detected")
 
 
-def detect_validation_strategy(project_root: Path) -> str:
-    return detect_validation_plan(project_root).strategy
+def detect_validation_strategy(
+    project_root: Path | None = None,
+    project_files: list[str] | None = None,
+    validation_commands: list[str] | None = None,
+) -> str:
+    if project_root is not None:
+        return detect_validation_plan(project_root).strategy
+    return infer_validation_strategy_from_evidence(project_files=project_files, validation_commands=validation_commands)

@@ -100,6 +100,7 @@ echocode smoke "diagnóstico breve del backend actual"
 - `doctor`, `backend-check`, `ask`, `plan`, `resume`, and `smoke` share the same normalized backend health model.
 - Final answer grounding rejects unsupported file, symbol, command, change, and validation claims.
 - Shell execution is constrained to a safe policy: no shell metacharacters, no `shell=True`, and no destructive executables.
+- Session artifacts persist a `runtime_trace` with phase timings, backend request outcomes, retry count, grounding outcome, and remaining time budget.
 
 ## Execution Model
 
@@ -112,6 +113,15 @@ Echo runs around a small staged runtime instead of a single free-form turn.
 
 The planner and runtime share the same stage model, so a failed stage is recorded as `failed` or `replanned` instead of silently disappearing.
 
+The runtime is intentionally split into small owners instead of a single giant loop.
+
+- `prepare.py`: resume seeding, inspection seeding, intake message construction, preflight decision
+- `model_loop.py`: request loop, retry gating, grounding retry, honest degradation after budget exhaustion
+- `backend_runtime.py`: backend request dispatch, timeout wrapping, backend activity, backend log mutation, request outcome normalization
+- `verify_flow.py`: auto-verify handoff from runtime into detected project validation
+- `finalize.py`: session closing, summary/materialization, artifact persistence
+- `trace.py`: runtime phase timing and compact request trace persistence
+
 ## Memory Model
 
 Echo persists compact operational memory instead of replaying the whole transcript.
@@ -120,6 +130,16 @@ Echo persists compact operational memory instead of replaying the whole transcri
 - `episodic memory`: decisions, errors, retries, replans, validations, changes
 - `operational summary`: confirmed facts, restrictions, stage progress, pending items
 - `cold memory`: long-session persistence without re-injecting irrelevant history
+
+## Runtime Trace
+
+Each persisted session keeps a compact runtime trace so slow or degraded runs stay auditable without replaying the full transcript.
+
+- high-level phases: `prepare`, `preflight`, `execute`, `verify`, `finalize`
+- backend request trace: message count, effective timeout, tools enabled, request duration, outcome
+- final runtime outcome: retry count, degraded vs grounded, remaining budget, terminal reason
+
+This trace is written both into the session JSON and the runtime artifact under `.echo/artifacts/`.
 
 ## Useful Commands
 

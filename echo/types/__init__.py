@@ -1,7 +1,26 @@
-from .models import ActivityEvent, BackendHealth, ColdMemory, EpisodicMemory, GroundingReport, OperationalMemory, PhaseRecord, PlanStage, RoutingDecision, RunState, RuntimeArtifact, SessionState, ToolCallRecord, WorkingMemory
+from .models import (
+    ActivityEvent,
+    BackendRequestTrace,
+    BackendHealth,
+    ColdMemory,
+    EpisodicMemory,
+    GroundingReport,
+    OperationalMemory,
+    PhaseRecord,
+    PlanStage,
+    RoutingDecision,
+    RunState,
+    RuntimeArtifact,
+    RuntimePhaseTrace,
+    RuntimeTrace,
+    SessionState,
+    ToolCallRecord,
+    WorkingMemory,
+)
 
 __all__ = [
     "ActivityEvent",
+    "BackendRequestTrace",
     "BackendHealth",
     "ColdMemory",
     "EpisodicMemory",
@@ -12,6 +31,8 @@ __all__ = [
     "RoutingDecision",
     "RunState",
     "RuntimeArtifact",
+    "RuntimePhaseTrace",
+    "RuntimeTrace",
     "SessionState",
     "ToolCallRecord",
     "WorkingMemory",

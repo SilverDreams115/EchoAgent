@@ -153,6 +153,12 @@ def smoke(
     strict_profile: bool = strict_profile_option(),
 ) -> None:
     agent, _, _ = safe_build_agent(project_dir, profile, strict_profile)
+    ask_prompt = (
+        "Inspecciona README.md y echo/config.py. Responde de forma breve y grounded al contexto. "
+        "Debes citar ambos archivos y al menos un identificador real de echo/config.py, por ejemplo Settings o from_env. "
+        "Evita copiar fragmentos largos; responde en 2-4 frases claras sobre qué dicen esos archivos para este contexto. "
+        f"Contexto: {prompt}"
+    )
     doctor_data = agent.doctor()
     table = Table(title="Echo smoke")
     table.add_column("Check", style="cyan")
@@ -206,7 +212,7 @@ def smoke(
     if not plan_answer.lower().count("echo/") and not plan_answer.lower().count("readme"):
         console.print("[red]Smoke failed:[/red] fallo del agente: plan no quedó grounded en archivos del repo.")
         raise typer.Exit(code=3)
-    answer, session_path, session = safe_agent_run(agent, prompt, mode="ask", profile=profile)
+    answer, session_path, session = safe_agent_run(agent, ask_prompt, mode="ask", profile=profile)
     if len(session.tool_calls) == 0:
         console.print("[red]Smoke failed:[/red] fallo del agente: ask no usó herramientas reales.")
         raise typer.Exit(code=3)

@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-import json
 from pathlib import Path
 import re
 
 from echo.types import GroundingReport, ToolCallRecord
-from .validation import detect_validation_plan
+from .validation import detect_validation_plan, infer_validation_strategy_from_evidence
+from .verifier_support import (
+    VerifierClaims,
+    VerifierDecision,
+    VerifierEvidence,
+    collect_tool_evidence,
+    command_prefix,
+    compute_evidence_usage,
+    compute_genericity_score,
+    extract_claims,
+    normalize_text,
+    synthesize_verifier_decision,
+)
 
 
 GENERIC_PATTERNS = [
@@ -24,126 +35,150 @@ GENERIC_PATTERNS = [
     "a grandes rasgos",
 ]
 SPECULATION_PATTERNS = ["probablemente", "parece", "podría", "quizá", "tal vez"]
-FILE_PATTERN = re.compile(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+")
-SYMBOL_PATTERN = re.compile(r"\b(?:class|def|async def)\s+([A-Za-z_][A-Za-z0-9_]*)|\b([A-Z][A-Za-z0-9_]{2,}|[a-z_][A-Za-z0-9_]{2,})\s*\(")
-SYMBOL_CLAIM_PATTERN = re.compile(r"\b(?:función|funcion|clase|método|metodo|símbolo|simbolo)\s+([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
-BACKTICK_SYMBOL_PATTERN = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)`")
 CHANGE_VERB_PATTERN = re.compile(r"\b(cambi[ée]|modifiqu[ée]|actualic[ée]|edit[ée]|ajust[ée]|a[ñn]ad[íi])\b", re.IGNORECASE)
 SUCCESS_PATTERNS = ["sin errores", "todo correcto", "todo pasó", "validado correctamente", "tests pasaron", "pasó la validación"]
-VALIDATION_PATTERNS = ["pytest", "unittest", "npm test", "pnpm test", "yarn test", "python -m unittest", "python3 -m unittest"]
-COMMAND_CLAIM_PATTERN = re.compile(r"`([^`\n]+)`")
 VALIDATION_EXECUTION_PATTERN = re.compile(
     r"\b(?:ejecut[ée]|ejecute|corr[íi]|corri|valid[ée]|valide|pasó|pasaron)\b.{0,50}\b(?:pytest|unittest|npm test|pnpm test|yarn test)\b",
     re.IGNORECASE,
 )
 
-
-def _collect_symbols(tool_result_previews: list[str]) -> set[str]:
-    symbols: set[str] = set()
-    for preview in tool_result_previews:
-        for match in SYMBOL_PATTERN.finditer(preview or ""):
-            symbol = match.group(1) or match.group(2)
-            if symbol and len(symbol) >= 3:
-                symbols.add(symbol)
-    return symbols
-
-
-def _normalize(text: str) -> str:
-    return (text or "").lower()
-
-
-def _safe_json_loads(text: str) -> dict[str, object]:
-    try:
-        loaded = json.loads(text)
-    except Exception:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
-def _command_prefix(command: str) -> str:
-    parts = command.strip().split()
-    if not parts:
-        return ""
-    return " ".join(parts[:3]).lower()
-
-
-def _tool_evidence(tool_calls: list[ToolCallRecord] | None, tool_result_previews: list[str]) -> dict[str, object]:
-    evidence = {
-        "read_files": set(),
-        "changed_files": set(),
-        "executed_commands": set(),
-        "validation_commands": set(),
-        "successful_validation_commands": set(),
-        "failed_validation_commands": set(),
-        "tool_errors": [],
-    }
-    for call in tool_calls or []:
-        path = str(call.arguments.get("path", "") or "")
-        if call.tool in {"read_file", "read_file_range", "search_symbol", "find_symbol"} and path:
-            evidence["read_files"].add(path)
-        if call.tool in {"write_file", "apply_patch", "insert_before", "insert_after", "replace_range"} and path:
-            evidence["changed_files"].add(path)
-        payload = _safe_json_loads(call.result_preview)
-        command = str(payload.get("command", "") or payload.get("validation_command", "") or "")
-        if command:
-            evidence["executed_commands"].add(command)
-        if call.tool == "validate_project":
-            validation_command = str(payload.get("validation_command", "") or command)
-            if validation_command:
-                evidence["validation_commands"].add(validation_command)
-                if int(payload.get("returncode", 1) or 1) == 0:
-                    evidence["successful_validation_commands"].add(validation_command)
-                else:
-                    evidence["failed_validation_commands"].add(validation_command)
-        if payload.get("error"):
-            evidence["tool_errors"].append(str(payload["error"]))
-    evidence["symbols"] = _collect_symbols(tool_result_previews)
-    return evidence
-
-
-def _extract_claimed_files(text: str) -> set[str]:
-    return set(FILE_PATTERN.findall(text or ""))
-
-
-def _extract_claimed_symbols(text: str) -> set[str]:
-    symbols = {match.group(1) for match in SYMBOL_CLAIM_PATTERN.finditer(text or "")}
-    symbols.update(match.group(1) for match in BACKTICK_SYMBOL_PATTERN.finditer(text or "") if len(match.group(1)) >= 3)
-    return {item for item in symbols if item}
-
-
-def _extract_command_claims(text: str) -> set[str]:
-    commands = {match.group(1).strip() for match in COMMAND_CLAIM_PATTERN.finditer(text or "") if " " in match.group(1).strip()}
-    return {item for item in commands if item}
-
-
 def detect_validation_strategy(project_root: Path | None = None, project_files: list[str] | None = None, validation_commands: list[str] | None = None) -> str:
     if project_root is not None:
         return detect_validation_plan(project_root).strategy
-    commands = " ".join(validation_commands or []).lower()
-    files = " ".join(project_files or []).lower()
-    if "python -m pytest" in commands or "python3 -m pytest" in commands or "pytest" in commands:
-        return "pytest"
-    if "python -m unittest" in commands or "python3 -m unittest" in commands or "unittest" in commands:
-        return "unittest"
-    if "npm test" in commands:
-        return "npm-test"
-    if "pnpm test" in commands:
-        return "pnpm-test"
-    if "yarn test" in commands:
-        return "yarn-test"
-    if "npm run lint" in commands:
-        return "npm-run-lint"
-    if "pnpm run lint" in commands:
-        return "pnpm-run-lint"
-    if "yarn lint" in commands:
-        return "yarn-lint"
-    if "npm run typecheck" in commands:
-        return "npm-run-typecheck"
-    if "pnpm run typecheck" in commands:
-        return "pnpm-run-typecheck"
-    if "compileall" in commands or any(item.endswith(".py") for item in files.split()):
-        return "compileall" if commands else "unknown"
-    return "unknown"
+    return infer_validation_strategy_from_evidence(project_files=project_files, validation_commands=validation_commands)
+
+
+def _banned_pattern_reason(low: str) -> str | None:
+    banned = [
+        "soy claude",
+        "anthropic",
+        "no tengo acceso a archivos",
+        "no tengo la capacidad de inspeccionar",
+    ]
+    for item in banned:
+        if item in low:
+            return f"Respuesta inválida por patrón: {item}"
+    if "tool_call" in low or '"function"' in low:
+        return "Respuesta inválida: expone pseudo tool calls."
+    return None
+
+
+def _apply_file_checks(report: GroundingReport, *, low: str, claims: VerifierClaims, evidence: VerifierEvidence, inspected_files: list[str], changed_files: list[str]) -> None:
+    evidence_files = set(inspected_files) | set(changed_files) | evidence.read_files | evidence.changed_files
+    mentioned_files = {path for path in evidence_files if path and path.lower() in low}
+    if not mentioned_files:
+        mentioned_files = {item for item in claims.files if item in evidence_files}
+        report.unsupported_files = sorted(item for item in claims.files if item not in evidence_files)
+    report.grounded_file_count = len(mentioned_files)
+
+
+def _apply_symbol_checks(report: GroundingReport, *, low: str, claims: VerifierClaims, evidence: VerifierEvidence) -> None:
+    mentioned_symbols = {symbol for symbol in evidence.symbols if symbol.lower() in low} | {symbol for symbol in claims.symbols if symbol in evidence.symbols}
+    report.grounded_symbol_count = len(mentioned_symbols)
+    report.unsupported_symbols = sorted(symbol for symbol in claims.symbols if symbol not in evidence.symbols)
+
+
+def _apply_command_checks(report: GroundingReport, *, claims: VerifierClaims, evidence: VerifierEvidence) -> None:
+    executed_command_prefixes = {command_prefix(item) for item in evidence.executed_commands if item}
+    unsupported_commands: set[str] = set()
+    for command in claims.commands:
+        prefix = command_prefix(command)
+        if prefix and prefix not in executed_command_prefixes:
+            unsupported_commands.add(command)
+    report.unsupported_commands = sorted(unsupported_commands)
+
+
+def _apply_claim_type_flags(report: GroundingReport, *, claims: VerifierClaims, change_claimed: bool, validation_claimed: bool) -> None:
+    if change_claimed:
+        report.claim_types.append("change")
+    if report.grounded_file_count or report.unsupported_files:
+        report.claim_types.append("file")
+    if claims.symbols or report.unsupported_symbols:
+        report.claim_types.append("symbol")
+    if claims.commands:
+        report.claim_types.append("command")
+    if validation_claimed:
+        report.claim_types.append("validation")
+
+
+def _apply_change_checks(report: GroundingReport, *, change_claimed: bool, changed_files: list[str], evidence: VerifierEvidence) -> None:
+    if not change_claimed:
+        return
+    if report.unsupported_files:
+        report.unsupported_changes = list(report.unsupported_files)
+    elif not (changed_files or evidence.changed_files):
+        report.unsupported_changes = ["no_changed_files"]
+
+
+def _apply_validation_checks(report: GroundingReport, *, low: str, validation_claimed: bool, validation_strategy: str, evidence: VerifierEvidence) -> None:
+    if validation_claimed:
+        if not evidence.validation_commands:
+            report.unsupported_commands = sorted(set(report.unsupported_commands + ["validation-not-executed"]))
+        elif evidence.failed_validation_commands and any(token in low for token in ["validado", "pasó", "sin errores", "todo correcto"]):
+            report.contradiction_flags.append("validation-claimed-success-but-failed")
+
+    strategy_markers = {
+        "pytest": ["pytest"],
+        "unittest": ["unittest"],
+        "compileall": ["compileall"],
+        "npm-test": ["npm test"],
+        "pnpm-test": ["pnpm test"],
+        "yarn-test": ["yarn test"],
+        "npm-run-lint": ["npm run lint"],
+        "pnpm-run-lint": ["pnpm run lint"],
+        "yarn-lint": ["yarn lint"],
+        "npm-run-typecheck": ["npm run typecheck"],
+        "pnpm-run-typecheck": ["pnpm run typecheck"],
+        "yarn-typecheck": ["yarn typecheck"],
+    }
+    mentioned_strategies = {name for name, markers in strategy_markers.items() if any(marker in low for marker in markers)}
+    strategy_match = True
+    if validation_strategy != "unknown" and mentioned_strategies and validation_strategy not in mentioned_strategies:
+        strategy_match = False
+    if validation_strategy == "unknown" and validation_claimed and not evidence.validation_commands:
+        strategy_match = False
+    report.validation_strategy_match = strategy_match
+
+
+def _apply_genericity_and_usefulness(
+    report: GroundingReport,
+    *,
+    text: str,
+    low: str,
+    mode: str,
+    tool_result_previews: list[str],
+    evidence: VerifierEvidence,
+    change_claimed: bool,
+    validation_claimed: bool,
+) -> None:
+    report.evidence_usage = compute_evidence_usage(low, tool_result_previews)
+    report.genericity_score = compute_genericity_score(
+        text=text,
+        low=low,
+        grounded_file_count=report.grounded_file_count,
+        grounded_symbol_count=report.grounded_symbol_count,
+        evidence_symbols=evidence.symbols,
+        generic_patterns=GENERIC_PATTERNS,
+    )
+    if report.evidence_usage == 0 and tool_result_previews:
+        report.genericity_score += 3
+    if report.grounded_file_count and report.grounded_symbol_count == 0 and len(evidence.symbols) >= 2:
+        report.genericity_score += 2
+    if mode == "ask" and report.claim_types == ["file"]:
+        report.genericity_score += 2
+    report.speculation_flags = [item for item in SPECULATION_PATTERNS if item in low]
+    report.useful = bool(
+        report.grounded_symbol_count
+        or report.evidence_usage
+        or (validation_claimed and evidence.validation_commands)
+        or (change_claimed and not report.unsupported_changes)
+    )
+
+
+def _apply_verifier_decision(report: GroundingReport, decision: VerifierDecision) -> GroundingReport:
+    report.valid = decision.valid
+    report.reason = decision.reason
+    return report
 
 
 def evaluate_final_answer(
@@ -162,189 +197,54 @@ def evaluate_final_answer(
     changed_files = changed_files or []
     tool_result_previews = tool_result_previews or []
     working_set = working_set or []
-    low = _normalize(text)
+    low = normalize_text(text)
     validation_strategy = validation_strategy or "unknown"
     report = GroundingReport(validation_strategy=validation_strategy)
 
-    banned = [
-        "soy claude",
-        "anthropic",
-        "no tengo acceso a archivos",
-        "no tengo la capacidad de inspeccionar",
-    ]
-    for item in banned:
-        if item in low:
-            report.valid = False
-            report.reason = f"Respuesta inválida por patrón: {item}"
-            return report
-    if "tool_call" in low or '"function"' in low:
+    banned_reason = _banned_pattern_reason(low)
+    if banned_reason is not None:
         report.valid = False
-        report.reason = "Respuesta inválida: expone pseudo tool calls."
+        report.reason = banned_reason
         return report
 
-    evidence = _tool_evidence(tool_calls, tool_result_previews)
-    evidence_files = set(inspected_files) | set(changed_files) | set(evidence["read_files"]) | set(evidence["changed_files"])
-    mentioned_files = {path for path in evidence_files if path and path.lower() in low}
-    if not mentioned_files:
-        extracted = _extract_claimed_files(text)
-        mentioned_files = {item for item in extracted if item in evidence_files}
-        report.unsupported_files = sorted(item for item in extracted if item not in evidence_files)
-    report.grounded_file_count = len(mentioned_files)
-
-    evidence_usage = 0
-    for item in tool_result_previews[-10:]:
-        snippet = (item or "")[:180].lower()
-        tokens = [token for token in re.findall(r"[a-z0-9_./:-]{4,}", snippet) if token not in {"path", "content", "matches", "symbol"}]
-        if snippet and any(token in low for token in tokens[:10]):
-            evidence_usage += 1
-    report.evidence_usage = evidence_usage
-
-    evidence_symbols = set(evidence["symbols"])
-    claimed_symbols = _extract_claimed_symbols(text)
-    mentioned_symbols = {symbol for symbol in evidence_symbols if symbol.lower() in low} | {symbol for symbol in claimed_symbols if symbol in evidence_symbols}
-    report.grounded_symbol_count = len(mentioned_symbols)
-    report.unsupported_symbols = sorted(symbol for symbol in claimed_symbols if symbol not in evidence_symbols)
-
-    executed_command_prefixes = {_command_prefix(item) for item in evidence["executed_commands"] if item}
-    claimed_commands = _extract_command_claims(text)
-    unsupported_commands: set[str] = set()
-    for command in claimed_commands:
-        prefix = _command_prefix(command)
-        if prefix and prefix not in executed_command_prefixes and command.lower() not in low:
-            continue
-        if prefix and prefix not in executed_command_prefixes:
-            unsupported_commands.add(command)
-    report.unsupported_commands = sorted(unsupported_commands)
+    evidence = collect_tool_evidence(tool_calls, tool_result_previews)
+    claims = extract_claims(text)
+    _apply_file_checks(report, low=low, claims=claims, evidence=evidence, inspected_files=inspected_files, changed_files=changed_files)
+    _apply_symbol_checks(report, low=low, claims=claims, evidence=evidence)
+    _apply_command_checks(report, claims=claims, evidence=evidence)
 
     change_claimed = bool(CHANGE_VERB_PATTERN.search(text or ""))
-    if change_claimed:
-        report.claim_types.append("change")
-        if report.unsupported_files:
-            report.unsupported_changes = list(report.unsupported_files)
-        elif not (changed_files or evidence["changed_files"]):
-            report.unsupported_changes = ["no_changed_files"]
-
-    if mentioned_files:
-        report.claim_types.append("file")
-    if claimed_symbols:
-        report.claim_types.append("symbol")
-    if claimed_commands:
-        report.claim_types.append("command")
     validation_claimed = bool(VALIDATION_EXECUTION_PATTERN.search(text or "")) or any(
         command.lower() in low and any(token in low for token in ["ejecut", "corr", "valid", "pasó", "pasaron"])
-        for command in claimed_commands
+        for command in claims.commands
     )
-    if validation_claimed:
-        report.claim_types.append("validation")
-        if not evidence["validation_commands"]:
-            report.unsupported_commands = sorted(set(report.unsupported_commands + ["validation-not-executed"]))
-        elif evidence["failed_validation_commands"] and any(token in low for token in ["validado", "pasó", "sin errores", "todo correcto"]):
-            report.contradiction_flags.append("validation-claimed-success-but-failed")
+    _apply_claim_type_flags(report, claims=claims, change_claimed=change_claimed, validation_claimed=validation_claimed)
+    _apply_change_checks(report, change_claimed=change_claimed, changed_files=changed_files, evidence=evidence)
+    _apply_validation_checks(report, low=low, validation_claimed=validation_claimed, validation_strategy=validation_strategy, evidence=evidence)
 
-    if any(token in low for token in SUCCESS_PATTERNS) and evidence["tool_errors"]:
+    if any(token in low for token in SUCCESS_PATTERNS) and evidence.tool_errors:
         report.contradiction_flags.append("success-claimed-with-tool-errors")
-    if report.unsupported_files:
-        report.claim_types.append("file")
-    if report.unsupported_symbols:
-        report.claim_types.append("symbol")
-
-    genericity_score = 0
-    if len((text or "").strip()) < 60:
-        genericity_score += 2
-    for pattern in GENERIC_PATTERNS:
-        if pattern in low:
-            genericity_score += 2
-    if report.grounded_file_count == 0:
-        genericity_score += 3
-    if evidence_symbols and report.grounded_symbol_count == 0:
-        genericity_score += 3
-    if report.evidence_usage == 0 and tool_result_previews:
-        genericity_score += 3
-    if report.grounded_file_count and report.grounded_symbol_count == 0 and len(evidence_symbols) >= 2:
-        genericity_score += 2
-    if mode == "ask" and report.claim_types == ["file"]:
-        genericity_score += 2
-    report.genericity_score = genericity_score
-
-    speculation = [item for item in SPECULATION_PATTERNS if item in low]
-    report.speculation_flags = speculation
-
-    strategy_match = True
-    strategy_markers = {
-        "pytest": ["pytest"],
-        "unittest": ["unittest"],
-        "compileall": ["compileall"],
-        "npm-test": ["npm test"],
-        "pnpm-test": ["pnpm test"],
-        "yarn-test": ["yarn test"],
-        "npm-run-lint": ["npm run lint"],
-        "pnpm-run-lint": ["pnpm run lint"],
-        "yarn-lint": ["yarn lint"],
-        "npm-run-typecheck": ["npm run typecheck"],
-        "pnpm-run-typecheck": ["pnpm run typecheck"],
-    }
-    mentioned_strategies = {name for name, markers in strategy_markers.items() if any(marker in low for marker in markers)}
-    if validation_strategy != "unknown" and mentioned_strategies and validation_strategy not in mentioned_strategies:
-        strategy_match = False
-    if validation_strategy == "unknown" and validation_claimed and not evidence["validation_commands"]:
-        strategy_match = False
-    report.validation_strategy_match = strategy_match
-
-    report.useful = bool(
-        report.grounded_symbol_count
-        or evidence_usage
-        or (validation_claimed and evidence["validation_commands"])
-        or (change_claimed and not report.unsupported_changes)
+    _apply_genericity_and_usefulness(
+        report,
+        text=text,
+        low=low,
+        mode=mode,
+        tool_result_previews=tool_result_previews,
+        evidence=evidence,
+        change_claimed=change_claimed,
+        validation_claimed=validation_claimed,
     )
-
-    if mode == "plan":
-        required = ["objetivo", "archivos a revisar", "riesgos", "siguientes pasos"]
-        missing = [item for item in required if item not in low]
-        if missing:
-            report.valid = False
-            report.reason = f"Plan inválido: faltan secciones {', '.join(missing)}."
-            return report
-
-    if report.unsupported_files:
-        report.valid = False
-        report.reason = f"Respuesta no grounded: cita archivos no inspeccionados: {', '.join(report.unsupported_files[:4])}."
-    elif report.unsupported_symbols:
-        report.valid = False
-        report.reason = f"Respuesta no grounded: cita símbolos sin evidencia: {', '.join(report.unsupported_symbols[:4])}."
-    elif report.unsupported_commands:
-        report.valid = False
-        report.reason = f"Respuesta no grounded: afirma comandos o validaciones no ejecutados: {', '.join(report.unsupported_commands[:4])}."
-    elif report.unsupported_changes:
-        report.valid = False
-        report.reason = "Respuesta no grounded: afirma cambios que no ocurrieron."
-    elif report.contradiction_flags:
-        report.valid = False
-        report.reason = f"Respuesta contradictoria con evidencia real: {', '.join(report.contradiction_flags[:4])}."
-    elif tool_result_previews and report.grounded_file_count == 0:
-        report.valid = False
-        report.reason = "Respuesta no grounded: no menciona archivos inspeccionados."
-    elif evidence_symbols and report.grounded_symbol_count == 0 and mode == "ask":
-        report.valid = False
-        report.reason = "Respuesta no grounded: no menciona símbolos concretos vistos en la inspección."
-    elif tool_result_previews and report.evidence_usage == 0:
-        report.valid = False
-        report.reason = "Respuesta no grounded: no reutiliza evidencia de herramientas."
-    elif not report.validation_strategy_match:
-        report.valid = False
-        report.reason = f"Estrategia de validación inconsistente con el repo: {validation_strategy}."
-    elif speculation and tool_result_previews:
-        report.valid = False
-        report.reason = f"Respuesta especulativa sin apoyo suficiente: {', '.join(speculation)}."
-    elif not report.useful and mode == "ask":
-        report.valid = False
-        report.reason = "Respuesta insuficiente: no concluye nada verificable ni accionable."
-    elif genericity_score >= 5:
-        report.valid = False
-        report.reason = "Respuesta demasiado genérica para el contexto inspeccionado."
-    elif profile in {"balanced", "deep"} and len((text or "").strip()) < 30:
-        report.valid = False
-        report.reason = "Respuesta demasiado breve para el perfil actual."
-    return report
+    return _apply_verifier_decision(
+        report,
+        synthesize_verifier_decision(
+            report,
+            profile=profile,
+            mode=mode,
+            text=text,
+            tool_result_previews=tool_result_previews,
+            evidence=evidence,
+        ),
+    )
 
 
 def validate_final_answer(

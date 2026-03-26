@@ -25,5 +25,11 @@ jobs:
       - name: Install package
         run: pip install -e .
 
-      - name: Run unit tests
+      - name: Run runtime invariant suite
+        run: python -m unittest -v tests.test_runtime_flows
+
+      - name: Run full unit tests
         run: python -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Check CLI import surface
+        run: python -m echo.cli.app --help
