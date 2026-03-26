@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
-IGNORED = {".git", ".venv", "node_modules", "__pycache__", ".echo"}
+from echo.fsignore import is_ignored_name
 
 
 def build_repo_map(project_root: Path, max_depth: int = 2, max_entries: int = 200) -> list[str]:
@@ -19,7 +18,7 @@ def build_repo_map(project_root: Path, max_depth: int = 2, max_entries: int = 20
         except Exception:
             return
         for child in children:
-            if child.name in IGNORED:
+            if is_ignored_name(child.name):
                 continue
             rel = child.relative_to(project_root)
             prefix = "  " * depth

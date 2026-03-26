@@ -5,11 +5,13 @@ import difflib
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from typing import Any
 
 from echo.cognition.validation import detect_validation_plan
 from echo.config import Settings
+from echo.fsignore import is_ignored_name, iter_project_files
 from echo.memory import EchoStore
 from echo.runtime.activity import ActivityBus
 from echo.tools.shell_policy import validate_shell_command
@@ -39,8 +41,8 @@ class ToolRegistry:
             ),
             self._tool("search_text", "Search text in the repository.", {"query": {"type": "string"}}, ["query"]),
             self._tool("grep_code", "Search code text in the repository.", {"query": {"type": "string"}}, ["query"]),
-            self._tool("search_symbol", "Search code symbols in a specific file or the whole repo.", {"symbol": {"type": "string"}, "path": {"type": "string"}}, ["symbol"]),
-            self._tool("find_symbol", "Find code symbols in the repository.", {"symbol": {"type": "string"}, "path": {"type": "string"}}, ["symbol"]),
+            self._tool("search_symbol", "Search Python symbols in a specific file or the whole repo.", {"symbol": {"type": "string"}, "path": {"type": "string"}}, ["symbol"]),
+            self._tool("find_symbol", "Find Python symbols in the repository.", {"symbol": {"type": "string"}, "path": {"type": "string"}}, ["symbol"]),
             self._tool("write_file", "Write a text file inside the current project.", {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
             self._tool(
                 "apply_patch",
@@ -155,7 +157,7 @@ class ToolRegistry:
                 return
             children = sorted(current.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
             for child in children:
-                if child.name in {".git", ".venv", "node_modules", "__pycache__", ".echo"}:
+                if is_ignored_name(child.name):
                     continue
                 rel_path = child.relative_to(self.project_root)
                 results.append(str(rel_path) + ("/" if child.is_dir() else ""))
@@ -189,11 +191,36 @@ class ToolRegistry:
     def tool_search_text(self, arguments: dict[str, Any]) -> dict[str, Any]:
         query = str(arguments["query"])
         self.activity.emit("Inspector", "running", "Inspector searching text", query)
-        command = ["rg", "-n", "--hidden", "--glob", "!.echo/**", "--glob", "!.venv/**", query, str(self.project_root)]
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=self.settings.shell_timeout)
-        matches = completed.stdout.splitlines()[:120]
+        if shutil.which("rg"):
+            command = [
+                "rg",
+                "-n",
+                "--hidden",
+                "--glob",
+                "!.echo/**",
+                "--glob",
+                "!.venv/**",
+                "--glob",
+                "!venv/**",
+                "--glob",
+                "!.git/**",
+                "--glob",
+                "!node_modules/**",
+                "--glob",
+                "!__pycache__/**",
+                query,
+                str(self.project_root),
+            ]
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=self.settings.shell_timeout)
+            matches = completed.stdout.splitlines()[:120]
+            returncode = completed.returncode
+            engine = "rg"
+        else:
+            matches = self._python_search_text(query)
+            returncode = 0 if matches else 1
+            engine = "python"
         self.activity.emit("Inspector", "done", "Text search completed", f"matches={len(matches)}")
-        return {"query": query, "matches": matches, "returncode": completed.returncode}
+        return {"query": query, "matches": matches, "returncode": returncode, "engine": engine}
 
     def tool_grep_code(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return self.tool_search_text(arguments)
@@ -201,10 +228,12 @@ class ToolRegistry:
     def tool_search_symbol(self, arguments: dict[str, Any]) -> dict[str, Any]:
         symbol = str(arguments["symbol"])
         rel = str(arguments.get("path", "") or "")
-        targets = [self._resolve_path(rel)] if rel else [path for path in self.project_root.rglob("*.py") if ".echo" not in path.parts and ".venv" not in path.parts]
+        targets = [self._resolve_path(rel)] if rel else list(iter_project_files(self.project_root, "*.py"))
         self.activity.emit("Inspector", "running", "Inspector searching symbol", symbol)
         results: list[dict[str, Any]] = []
         for path in targets:
+            if path.suffix != ".py":
+                continue
             try:
                 text = path.read_text(encoding="utf-8")
             except Exception:
@@ -215,7 +244,7 @@ class ToolRegistry:
                         line = text[:match.start()].count("\n") + 1
                         results.append({"path": str(path.relative_to(self.project_root)), "line": line, "symbol": symbol})
         self.activity.emit("Inspector", "done", "Symbol search completed", f"matches={len(results)}")
-        return {"symbol": symbol, "matches": results[:80]}
+        return {"symbol": symbol, "matches": results[:80], "scope": "python-only"}
 
     def tool_find_symbol(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return self.tool_search_symbol(arguments)
@@ -348,3 +377,19 @@ class ToolRegistry:
         if not self._in_git_repo():
             return {"error": "No .git directory found in project root."}
         return self.tool_run_shell({"command": "git diff --stat"})
+
+    def _python_search_text(self, query: str) -> list[str]:
+        matches: list[str] = []
+        needle = query.lower()
+        for path in iter_project_files(self.project_root):
+            try:
+                content = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            rel = path.relative_to(self.project_root)
+            for index, line in enumerate(content.splitlines(), start=1):
+                if needle in line.lower():
+                    matches.append(f"{rel}:{index}:{line}")
+                    if len(matches) >= 120:
+                        return matches
+        return matches

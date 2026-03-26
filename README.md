@@ -19,21 +19,50 @@ Echo is a local coding agent CLI focused on grounded repo inspection, real tool 
 
 ## Install
 
+### Python Install
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
+This exposes:
+
+- `echocode`
+- `echo-agent`
+
+### npm Install
+
+Echo also ships an npm launcher for local/global CLI installation:
+
+```bash
+npm install -g .
+echo-agent doctor
+```
+
+What the npm package actually does:
+
+- installs a Node launcher
+- prefers a Python interpreter that already has Echo dependencies available
+- otherwise bootstraps a managed Python virtualenv on first run and installs the local package there
+
+Real requirement: Echo is still a Python application. A working `python3`/`python` 3.10+ is required. On a machine without the Python dependencies already installed, the first npm-launched run also needs access to Python packages so the managed environment can be prepared.
+
+### Global Command Names
+
+- `echo-agent`: primary global command, safe across Linux/macOS/Windows
+- `echocode`: compatibility command retained for existing users
+- `echo`: **not** claimed as a universal command on Unix-like shells because `echo` is commonly a shell builtin and cannot be overridden robustly from npm or `PATH` alone
+
 ## Quick Start
 
 ```bash
-echocode doctor
-echocode backend-check --chat-samples 1
-echocode shell
-echocode ask "inspecciona este proyecto"
-echocode plan "propón un cambio seguro"
-echocode resume
+echo-agent doctor
+echo-agent backend-check --chat-samples 1
+echo-agent ask "inspecciona este proyecto"
+echo-agent plan "propón un cambio seguro"
+echo-agent resume
 ```
 
 ## Profiles
@@ -100,8 +129,10 @@ echocode smoke "diagnóstico breve del backend actual"
 - `doctor`, `backend-check`, `ask`, `plan`, `resume`, and `smoke` share the same normalized backend health model.
 - Final answer grounding rejects unsupported file, symbol, command, change, and validation claims.
 - Shell execution is constrained to a safe policy: no shell metacharacters, no `shell=True`, and no destructive executables.
+- Shell execution and file writes are disabled by default. Enable them explicitly with `ECHO_ALLOW_SHELL=1` and/or `ECHO_ALLOW_WRITE=1`.
 - Session artifacts persist a `runtime_trace` with phase timings, backend request outcomes, retry count, grounding outcome, and remaining time budget.
 - Simple `ask` requests that target one or two explicit files are slimmed before backend dispatch: fewer snippet lines, no repo map, and no extra tool/stage guidance when that context would only add latency.
+- Recursive inspection and validation ignore environment noise such as `.git`, `.echo`, `.venv`, `venv`, `node_modules`, and common Python caches.
 
 ## Execution Model
 
@@ -122,6 +153,7 @@ The runtime is intentionally split into small owners instead of a single giant l
 - `verify_flow.py`: auto-verify handoff from runtime into detected project validation
 - `finalize.py`: session closing, summary/materialization, artifact persistence
 - `trace.py`: runtime phase timing and compact request trace persistence
+- `request_shape.py`: compact description of the real backend request payload for latency auditing
 
 ## Memory Model
 
@@ -146,10 +178,15 @@ This trace is written both into the session JSON and the runtime artifact under 
 ## Useful Commands
 
 ```bash
-echocode doctor
-echocode backend-check --chat-samples 2
-echocode ask "inspecciona echo/runtime/engine.py y explica el flujo"
-echocode plan "refuerza grounding y runtime"
-echocode resume "continúa desde la última sesión"
-echocode smoke "valida doctor, ask y resume"
+echo-agent doctor
+echo-agent backend-check --chat-samples 2
+echo-agent ask "inspecciona echo/runtime/engine.py y explica el flujo"
+echo-agent plan "refuerza grounding y runtime"
+echo-agent resume "continúa desde la última sesión"
+echo-agent smoke "valida doctor, ask y resume"
 ```
+
+## Tooling Scope
+
+- `search_text` uses `rg` when available and falls back to an internal Python search when it is not.
+- `search_symbol` and `find_symbol` are currently Python-only symbol searches. They do not claim general multi-language semantic indexing.

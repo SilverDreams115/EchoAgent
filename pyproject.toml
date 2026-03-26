@@ -17,6 +17,7 @@ dependencies = [
 
 [project.scripts]
 echocode = "echo.cli.app:app"
+echo-agent = "echo.cli.app:app"
 
 [tool.setuptools]
 packages = [
