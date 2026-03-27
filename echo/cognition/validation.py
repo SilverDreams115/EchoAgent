@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
-from echo.fsignore import iter_project_files
 
 VALIDATION_STRATEGIES = {
     "pytest",
@@ -61,12 +60,11 @@ def _has_pytest_configuration(project_root: Path) -> tuple[bool, str]:
 
 def _python_test_layout(project_root: Path) -> tuple[bool, str]:
     tests_dir = project_root / "tests"
-    if not tests_dir.exists() or not tests_dir.is_dir():
+    if not tests_dir.exists():
         return False, ""
-    test_files = [path.relative_to(project_root) for path in iter_project_files(tests_dir, "*.py")]
-    if any(path.name.startswith("test_") for path in test_files):
+    if any(tests_dir.rglob("test_*.py")):
         return True, "tests/test_*.py layout detected"
-    if any(path.name.endswith("_test.py") for path in test_files):
+    if any(tests_dir.rglob("*_test.py")):
         return True, "tests/*_test.py layout detected"
     return False, ""
 
@@ -105,7 +103,7 @@ def infer_validation_strategy_from_evidence(*, project_files: list[str] | None =
 
 def detect_validation_plan(project_root: Path) -> ValidationPlan:
     package_json = project_root / "package.json"
-    has_python = any(iter_project_files(project_root, "*.py"))
+    has_python = any(project_root.rglob("*.py"))
 
     has_pytest_config, pytest_reason = _has_pytest_configuration(project_root)
     if has_pytest_config:

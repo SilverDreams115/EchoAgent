@@ -6,11 +6,7 @@ import json
 from pathlib import Path
 
 from echo.backends.health import rolling_backend_health_from_log
-from echo.types import ActivityEvent, BackendHealth, BranchMeta, BranchState, ColdMemory, EpisodicMemory, OperationalMemory, PlanStage, SessionState, ToolCallRecord, WorkingMemory
-
-
-def _store_utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from echo.types import ActivityEvent, BackendHealth, ColdMemory, EpisodicMemory, OperationalMemory, PlanStage, SessionState, ToolCallRecord, WorkingMemory
 
 
 class EchoStore:
@@ -25,8 +21,6 @@ class EchoStore:
         self.state = self.base / "state"
         for directory in [self.sessions, self.memory, self.artifacts, self.logs, self.cache, self.state]:
             directory.mkdir(parents=True, exist_ok=True)
-        self.branches = self.state / "branches"
-        self.branches.mkdir(parents=True, exist_ok=True)
         self.current_session_file = self.state / "current_session.txt"
         self.command_log = self.logs / "commands.jsonl"
         self.backend_log = self.logs / "backend.jsonl"
@@ -142,114 +136,3 @@ class EchoStore:
 
     def read_backend_health(self) -> BackendHealth:
         return rolling_backend_health_from_log(self.backend_log)
-
-    # ------------------------------------------------------------------ #
-    # Branch management                                                     #
-    # ------------------------------------------------------------------ #
-
-    def _active_branch_file(self) -> Path:
-        return self.state / "active_branch.json"
-
-    def active_branch(self) -> BranchState | None:
-        """Return the active branch pointer, or None if not yet initialized."""
-        path = self._active_branch_file()
-        if not path.exists():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return BranchState(**data)
-        except Exception:
-            return None
-
-    def _write_active_branch(self, state: BranchState) -> None:
-        state.updated_at = _store_utc_now()
-        self._active_branch_file().write_text(
-            json.dumps(asdict(state), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
-    def set_active_branch(self, branch_name: str) -> None:
-        """Persist a new active branch pointer."""
-        self._write_active_branch(BranchState(branch_name=branch_name))
-
-    def load_branch(self, name: str) -> BranchMeta | None:
-        """Load branch metadata by name, or None if not found / corrupt."""
-        path = self.branches / f"{_safe_branch_filename(name)}.json"
-        if not path.exists():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return BranchMeta(**data)
-        except Exception:
-            return None
-
-    def save_branch(self, branch: BranchMeta) -> None:
-        """Persist branch metadata (creates or overwrites)."""
-        branch.updated_at = _store_utc_now()
-        path = self.branches / f"{_safe_branch_filename(branch.name)}.json"
-        path.write_text(json.dumps(asdict(branch), ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def update_branch_head(self, branch_name: str, session_id: str) -> None:
-        """Advance a branch's head pointer to a new session. Creates the branch if missing."""
-        branch = self.load_branch(branch_name)
-        if branch is None:
-            branch = BranchMeta(name=branch_name, head_session_id=session_id)
-        else:
-            branch.head_session_id = session_id
-        self.save_branch(branch)
-
-    def branch_head_session_id(self, branch_name: str) -> str | None:
-        """Return the head session ID for a branch, or None if missing / empty."""
-        branch = self.load_branch(branch_name)
-        if branch is None:
-            return None
-        return branch.head_session_id or None
-
-    def list_branches(self) -> list[BranchMeta]:
-        """Return all branches sorted by name."""
-        results = []
-        for path in sorted(self.branches.glob("*.json")):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                results.append(BranchMeta(**data))
-            except Exception:
-                pass
-        return results
-
-    def delete_branch(self, name: str) -> None:
-        """Remove a branch.  Raises ValueError for 'main'."""
-        if name == "main":
-            raise ValueError("Cannot delete the main branch.")
-        path = self.branches / f"{_safe_branch_filename(name)}.json"
-        if path.exists():
-            path.unlink()
-
-    def ensure_branch_model(self) -> BranchState:
-        """Idempotent migration / initialization.
-
-        * If the branch model already exists (active_branch.json present and
-          valid), return it unchanged.
-        * If corrupted or missing, rebuild a 'main' branch that points to the
-          most recent session (or empty if none exists) and activate it.
-        """
-        active = self.active_branch()
-        if active is not None:
-            # Verify the referenced branch file also exists; recreate if not.
-            if self.load_branch(active.branch_name) is not None:
-                return active
-        # Migration / first-time init: create main branch from latest session.
-        latest = self.latest_session_id()
-        main_branch = self.load_branch("main")
-        if main_branch is None:
-            main_branch = BranchMeta(name="main", head_session_id=latest or "")
-            self.save_branch(main_branch)
-        elif latest and not main_branch.head_session_id:
-            main_branch.head_session_id = latest
-            self.save_branch(main_branch)
-        state = BranchState(branch_name="main")
-        self._write_active_branch(state)
-        return state
-
-
-def _safe_branch_filename(name: str) -> str:
-    """Sanitize a branch name to a safe filesystem component."""
-    return "".join(c if c.isalnum() or c in "-_." else "_" for c in name)[:64]

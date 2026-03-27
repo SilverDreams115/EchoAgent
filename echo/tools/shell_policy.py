@@ -12,11 +12,13 @@ SAFE_COMMAND_POLICIES: dict[str, set[tuple[str, ...]]] = {
         ("-m", "compileall"),
         ("-m", "unittest"),
         ("-m", "pytest"),
+        ("-m", "pip"),
     },
     "python3": {
         ("-m", "compileall"),
         ("-m", "unittest"),
         ("-m", "pytest"),
+        ("-m", "pip"),
     },
     "pytest": {()},
     "git": {

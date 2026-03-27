@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from echo.fsignore import iter_project_files
 
 TEXT_EXTENSIONS = {
     ".py",
@@ -24,6 +23,7 @@ TEXT_EXTENSIONS = {
     ".sh",
 }
 
+IGNORED = {".git", ".venv", "node_modules", "__pycache__", ".echo"}
 PATH_PATTERN = re.compile(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+")
 ROOT_FILE_PATTERN = re.compile(r"\b[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+\b")
 
@@ -62,8 +62,10 @@ def select_relevant_files(project_root: Path, prompt: str, limit: int = 6) -> li
         return explicit[:limit]
     tokens = set(_tokens(prompt))
     scored: list[tuple[int, str]] = []
-    for path in iter_project_files(project_root):
-        if not _is_text_file(path):
+    for path in project_root.rglob("*"):
+        if any(part in IGNORED for part in path.parts):
+            continue
+        if not path.is_file() or not _is_text_file(path):
             continue
         rel = str(path.relative_to(project_root))
         if rel in explicit:

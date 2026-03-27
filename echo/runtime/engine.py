@@ -28,7 +28,6 @@ from echo.runtime.outcomes import build_degraded_answer, build_heuristic_plan, b
 from echo.runtime.prepare import build_intake_messages, evaluate_preflight, resume_seed, seed_inspection
 from echo.runtime.stages import find_stage, initialize_plan, plan_guidance_message, replan_stage, set_current_stage, update_stage
 from echo.runtime.trace import record_backend_request, record_runtime_phase, runtime_trace_payload, update_runtime_outcome
-from echo.runtime.tool_tracking import record_tool_call
 from echo.runtime.tool_calling import parse_tool_calls_from_text
 from echo.runtime.verify_flow import run_auto_verify
 from echo.tools import ToolRegistry
@@ -185,7 +184,69 @@ class AgentRuntime:
         arguments: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
-        record_tool_call(session, run_state, name, arguments, result)
+        tracked_path = arguments.get("path")
+        if isinstance(tracked_path, str) and tracked_path.strip():
+            if tracked_path not in session.focus_files:
+                session.focus_files.append(tracked_path)
+            if tracked_path not in session.working_set:
+                session.working_set.append(tracked_path)
+            if name in {"read_file", "read_file_range", "search_symbol", "find_symbol"} and tracked_path not in run_state.inspected_files:
+                run_state.inspected_files.append(tracked_path)
+            if name in {"write_file", "apply_patch", "insert_before", "insert_after", "replace_range"} and tracked_path not in run_state.changed_files:
+                run_state.changed_files.append(tracked_path)
+        if name == "validate_project" and "validation_command" in result:
+            command = str(result["validation_command"])
+            session.validation.append(command)
+            run_state.validation_commands.append(command)
+        if name in {"read_file", "read_file_range"}:
+            preview_payload = {
+                "path": result.get("path", ""),
+                "content": str(result.get("content", ""))[:2200],
+            }
+            preview = json.dumps(preview_payload, ensure_ascii=False)
+        elif name == "list_files":
+            preview = json.dumps({"items": list(result.get("items", []))[:80]}, ensure_ascii=False)
+        elif name in {"search_symbol", "find_symbol"}:
+            preview_payload = {
+                "path": result.get("path", ""),
+                "matches": list(result.get("matches", []))[:8],
+            }
+            preview = json.dumps(preview_payload, ensure_ascii=False)
+        elif name == "validate_project":
+            preview_payload = {
+                "validation_strategy": result.get("validation_strategy", ""),
+                "validation_command": result.get("validation_command", ""),
+                "returncode": result.get("returncode", -1),
+                "error": result.get("error", ""),
+                "stderr": str(result.get("stderr", ""))[:400],
+            }
+            preview = json.dumps(preview_payload, ensure_ascii=False)
+        else:
+            preview = json.dumps(result, ensure_ascii=False)[:400]
+        session.tool_calls.append(ToolCallRecord(tool=name, arguments=arguments, result_preview=preview))
+        if name in {"search_symbol", "find_symbol"} and isinstance(result.get("matches"), list):
+            for match in result["matches"][:8]:
+                symbol = match.get("symbol")
+                path = match.get("path")
+                if symbol and path:
+                    finding = f"{path}:{symbol}"
+                    if finding not in run_state.findings:
+                        run_state.findings.append(finding)
+        if result.get("error"):
+            issue = f"{name}: {result['error']}"
+            run_state.errors.append(issue)
+            if issue not in run_state.open_issues:
+                run_state.open_issues.append(issue)
+        current_stage = self._find_stage(run_state, run_state.current_stage_id)
+        if current_stage is not None:
+            evidence = []
+            if tracked_path:
+                evidence.append(str(tracked_path))
+            if name == "validate_project" and result.get("validation_command"):
+                evidence.append(str(result.get("validation_command")))
+            if evidence:
+                current_stage.evidence = list(dict.fromkeys(current_stage.evidence + evidence))
+                current_stage.updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     def _seed_inspection(self, session: SessionState, run_state: RunState, prompt: str) -> tuple[list[str], list[str], Any]:
         repo_limit, file_limit, snippet_line_limit = self._intake_limits()

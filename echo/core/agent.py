@@ -238,10 +238,8 @@ class EchoAgent:
 
     def current_status(self) -> dict[str, str]:
         run_state = self.last_run_state
-        active = self.store.active_branch()
         return {
             "session": self.last_session_id or "none",
-            "branch": active.branch_name if active else "none",
             "profile": self.resolved_profile,
             "profile_note": self.profile_note,
             "backend": self.selected_backend_name,
@@ -259,29 +257,11 @@ class EchoAgent:
         mode: str = "ask",
         resume_session_id: str | None = None,
         profile: str | None = None,
-        branch_name: str | None = None,
     ) -> tuple[str, Path, SessionState]:
         if profile:
             self.settings.profile = profile
         self._bind_runtime(profile or self.settings.profile, mode, prompt)
-
-        # Explicit resume_session_id wins; otherwise resume from branch head.
-        effective_resume_id = resume_session_id
-        if branch_name and effective_resume_id is None and mode in {"ask", "plan", "resume"}:
-            head = self.store.branch_head_session_id(branch_name)
-            if head:
-                effective_resume_id = head
-
-        answer, session_path, session, run_state = self.runtime.run(
-            prompt, mode=mode, resume_session_id=effective_resume_id
-        )
-
-        # Attach branch provenance and advance the branch head.
-        if branch_name:
-            session.branch_name = branch_name
-            self.store.save_session(session)
-            self.store.update_branch_head(branch_name, session.id)
-
+        answer, session_path, session, run_state = self.runtime.run(prompt, mode=mode, resume_session_id=resume_session_id)
         self.last_session_id = session.id
         self.last_run_state = run_state
         self.last_context_ratio = run_state.context_free_ratio

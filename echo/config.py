@@ -31,8 +31,8 @@ class Settings:
     shell_timeout: int = 20
     context_message_limit: int = 18
     context_char_limit: int = 18000
-    allow_write: bool = False
-    allow_shell: bool = False
+    allow_write: bool = True
+    allow_shell: bool = True
     theme: str = "dark"
     auto_verify: bool = True
     context_file_limit: int = 6
@@ -65,8 +65,8 @@ class Settings:
             shell_timeout=int(os.getenv("ECHO_SHELL_TIMEOUT", os.getenv("MINI_AGENT_SHELL_TIMEOUT", "20"))),
             context_message_limit=int(os.getenv("ECHO_CONTEXT_MESSAGE_LIMIT", "18")),
             context_char_limit=int(os.getenv("ECHO_CONTEXT_CHAR_LIMIT", "18000")),
-            allow_write=os.getenv("ECHO_ALLOW_WRITE", "0").lower() in {"1", "true", "yes", "on"},
-            allow_shell=os.getenv("ECHO_ALLOW_SHELL", "0").lower() in {"1", "true", "yes", "on"},
+            allow_write=os.getenv("ECHO_ALLOW_WRITE", "1").lower() in {"1", "true", "yes", "on"},
+            allow_shell=os.getenv("ECHO_ALLOW_SHELL", "1").lower() in {"1", "true", "yes", "on"},
             theme=os.getenv("ECHO_THEME", "dark"),
             auto_verify=os.getenv("ECHO_AUTO_VERIFY", "1").lower() in {"1", "true", "yes", "on"},
             context_file_limit=int(os.getenv("ECHO_CONTEXT_FILE_LIMIT", "6")),

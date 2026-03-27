@@ -17,11 +17,12 @@ dependencies = [
 
 [project.scripts]
 echocode = "echo.cli.app:app"
-echo-agent = "echo.cli.app:app"
+echo-agent = "echo.cli.app:echo_agent_main"
 
 [tool.setuptools]
 packages = [
   "echo",
+  "echo.branches",
   "echo.cli",
   "echo.core",
   "echo.cognition",

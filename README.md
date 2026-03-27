@@ -4,6 +4,37 @@
 
 Echo is a local coding agent CLI focused on grounded repo inspection, real tool execution, resumable sessions, backend-aware routing, and honest degradation when the model or backend is weak.
 
+The primary interface is a **conversational REPL** — type naturally, no subcommands required.
+
+## Quick Start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+
+echo-agent          # opens the conversational REPL directly
+```
+
+Inside the REPL:
+
+```
+[main] > revisa el runtime y dime qué falla
+Echo: ...
+
+[main] > crea una rama experimento-shell
+→ Branch 'experimento-shell' creado desde 'main'. Sesión: nueva
+
+[experimento-shell] > en esta rama intenta rediseñar el shell
+Echo: ...
+
+[experimento-shell] > vuelve a main
+→ Cambiado a branch 'main'. Sesión: session-abc123
+
+[main] > trae las decisiones de experimento-shell
+Cherry-pick 'experimento-shell' → 'main': decisions, findings…
+```
+
 ## What It Does
 
 - inspects real project files before answering
@@ -16,65 +47,143 @@ Echo is a local coding agent CLI focused on grounded repo inspection, real tool 
 - preserves resumable working state with compression and memory summaries
 - degrades cleanly when the backend is unavailable or unstable
 - verifies final answers against observed repo evidence, tool output, and executed validation
+- maintains **conversational branches** with merge and cherry-pick of structured context
 
-## Install
+## Conversational REPL
 
-### Python Install
+`echo-agent` opens a REPL directly — no subcommands, no menus.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+```
+╭──────────────────────────────────────────────────────╮
+│ Echo  ·  repo: my-project  ·  branch: main  ·  session: session-abc │
+╰──────────────────────────────────────────────────────╯
+/help para comandos  ·  Ctrl+D para salir
+
+[main] >
 ```
 
-This exposes:
+The session and active branch are loaded automatically. Each turn is persisted and linked to the previous one via `parent_session_id`.
 
-- `echocode`
-- `echo-agent`
+### Slash Commands
 
-### npm Install
-
-Echo also ships an npm launcher for local/global CLI installation:
-
-```bash
-npm install -g .
-echo-agent doctor
+```
+/help
+/exit
+/session status
+/session new
+/branch status
+/branch list
+/branch new <name>
+/branch switch <name>
+/branch show <name>
+/branch merge <source> [--strategy union-deduplicate|prefer-source|prefer-destination]
+/branch cherry-pick <source> [--decisions] [--findings] [--pending] [--facts] [--summary]
+/doctor
 ```
 
-What the npm package actually does:
+### Natural Language Routing
 
-- installs a Node launcher
-- prefers a Python interpreter that already has Echo dependencies available
-- otherwise bootstraps a managed Python virtualenv on first run and installs the local package there
+Branch operations can be expressed naturally:
 
-Real requirement: Echo is still a Python application. A working `python3`/`python` 3.10+ is required. On a machine without the Python dependencies already installed, the first npm-launched run also needs access to Python packages so the managed environment can be prepared.
+| Phrase | Action |
+|---|---|
+| `crea una rama experimento-shell` | `/branch new experimento-shell` |
+| `nueva rama feature-x` | `/branch new feature-x` |
+| `vuelve a main` | `/branch switch main` |
+| `cambia a feature-x` | `/branch switch feature-x` |
+| `merge experimento-shell` | `/branch merge experimento-shell` |
+| `trae las decisiones de experimento-shell` | `/branch cherry-pick experimento-shell --decisions` |
+| `lista de ramas` | `/branch list` |
+| `status` | `/session status` |
 
-### Global Command Names
+Everything else goes directly to the agent as a conversation turn.
 
-- `echo-agent`: primary global command, safe across Linux/macOS/Windows
-- `echocode`: compatibility command retained for existing users
-- `echo`: **not** claimed as a universal command on Unix-like shells because `echo` is commonly a shell builtin and cannot be overridden robustly from npm or `PATH` alone
+## Branches
 
-## Quick Start
+Each branch is independent. Sessions are tracked per branch under `.echo/branches/`.
 
 ```bash
-echo-agent doctor
-echo-agent backend-check --chat-samples 1
-echo-agent ask "inspecciona este proyecto"
-echo-agent plan "propón un cambio seguro"
-echo-agent resume
+echo-agent
+
+[main] > /branch new experiment
+→ Branch 'experiment' creado desde 'main'. Sesión: nueva
+
+[experiment] > /branch list
+  * experiment  (active)
+    main
+
+[experiment] > /branch switch main
+→ Cambiado a branch 'main'.
+
+[main] > /branch show experiment
+╭─ Branch: experiment ──────────────────────╮
+│ created: 2026-03-27T...                   │
+│ parent:  main                             │
+│ sessions: 3                               │
+│ merges:  1                                │
+╰───────────────────────────────────────────╯
 ```
+
+## Merge Between Branches
+
+Merge operates on **structured artefacts**, not raw transcripts. The mergeable types are:
+
+`decisions` · `findings` · `pending` · `facts` · `summary` · `errors` · `changes`
+
+```bash
+# While on main:
+/branch merge experiment
+
+# Or with an explicit strategy:
+/branch merge experiment --strategy prefer-source
+```
+
+**Strategies:**
+
+| Strategy | Behavior |
+|---|---|
+| `union-deduplicate` (default) | Union of both branches, deduplicated (case-insensitive) |
+| `prefer-source` | Source items first; destination adds non-duplicates |
+| `prefer-destination` | Destination intact; only new items from source are added |
+
+Merge creates a new session in the destination branch (`parent_session_id` links to the previous one). The agent can resume from this session with the full merged context. The merge is recorded in `.echo/branches/<dest>/merges/` for auditability.
+
+## Cherry-Pick Between Branches
+
+Bring only specific artefact types from another branch:
+
+```bash
+/branch cherry-pick experiment --decisions --findings
+/branch cherry-pick experiment --pending --facts
+```
+
+Or naturally:
+
+```
+trae las decisiones de experimento-shell
+```
+
+Cherry-pick does **not** mutate the source branch. Only the requested types are incorporated; all other artefact slots in the destination remain unchanged.
+
+## Security Policy for Mutating Actions
+
+The agent follows a conservative policy for operations that modify the repo:
+
+- `write_file` and `apply_patch` require `ECHO_ALLOW_WRITE=true` (default: off in strict mode)
+- `run_shell` is constrained to an explicit safe list of executables — no shell metacharacters, no `shell=True`, no destructive commands
+- Grounding validation rejects answers that claim file changes without proof in the tool log
+- Branch operations (merge, cherry-pick) only modify `.echo/` state — they never touch project files
 
 ## Profiles
 
-- `local`: local-first, practical, grounded, best when Ollama is healthy.
-- `balanced`: stronger defaults for non-trivial asks, with hybrid routing when fallback exists.
-- `deep`: prefers a frontier backend and can enforce strict backend availability.
+- `local`: local-first, practical, grounded, best when Ollama is healthy
+- `balanced`: stronger defaults for non-trivial asks, with hybrid routing when fallback exists
+- `deep`: prefers a frontier backend and can enforce strict backend availability
 
 ```bash
-echocode doctor --profile local
+echo-agent --profile balanced
+echo-agent --profile deep
 echocode ask --profile balanced "analiza runtime y routing"
-echocode ask --profile deep "haz análisis profundo"
 echocode ask --profile deep --strict-profile "haz análisis profundo"
 ```
 
@@ -85,7 +194,7 @@ echocode ask --profile deep --strict-profile "haz análisis profundo"
 ```bash
 ECHO_BACKEND=ollama \
 ECHO_MODEL=qwen2.5-coder:7b-oh \
-echocode doctor
+echo-agent
 ```
 
 ### OpenAI-Compatible
@@ -94,7 +203,7 @@ echocode doctor
 ECHO_BACKEND=openai-compatible \
 ECHO_MODEL=gpt-4.1-mini \
 ECHO_OPENAI_API_KEY=YOUR_KEY \
-echocode doctor
+echo-agent
 ```
 
 ### Strict Deep Profile
@@ -102,6 +211,20 @@ echocode doctor
 ```bash
 ECHO_OPENAI_API_KEY=YOUR_KEY \
 echocode smoke --profile deep --strict-profile "haz una verificación breve del backend"
+```
+
+## Legacy Subcommands
+
+`echocode` subcommands still work for scripting and CI:
+
+```bash
+echocode doctor
+echocode backend-check --chat-samples 2
+echocode ask "inspecciona echo/runtime/engine.py y explica el flujo"
+echocode plan "refuerza grounding y runtime"
+echocode resume "continúa desde la última sesión"
+echocode shell       # TUI multi-panel (alternative to echo-agent)
+echocode smoke "valida doctor, ask y resume"
 ```
 
 ## Validation
@@ -115,24 +238,9 @@ Echo detects a validation strategy from the real repo layout instead of assuming
 - `unknown` when no safe validation strategy can be proven from repo evidence
 
 ```bash
-PYTHONPATH=. python3 -m unittest tests.test_runtime_flows
-python -m unittest discover -s tests -p 'test_*.py'
+python3 -m pytest tests/
 echocode smoke "diagnóstico breve del backend actual"
 ```
-
-## Operational Notes
-
-- Echo stores runtime state, logs, memory, and session artifacts under `.echo/`.
-- `.gitignore` excludes `.echo/`, virtual environments, caches, and local secrets.
-- For critical `ask` workflows, use a healthy OpenAI-compatible fallback if Ollama chat is unstable.
-- `doctor` shows cached, fresh, and effective backend state so routing decisions are auditable.
-- `doctor`, `backend-check`, `ask`, `plan`, `resume`, and `smoke` share the same normalized backend health model.
-- Final answer grounding rejects unsupported file, symbol, command, change, and validation claims.
-- Shell execution is constrained to a safe policy: no shell metacharacters, no `shell=True`, and no destructive executables.
-- Shell execution and file writes are disabled by default. Enable them explicitly with `ECHO_ALLOW_SHELL=1` and/or `ECHO_ALLOW_WRITE=1`.
-- Session artifacts persist a `runtime_trace` with phase timings, backend request outcomes, retry count, grounding outcome, and remaining time budget.
-- Simple `ask` requests that target one or two explicit files are slimmed before backend dispatch: fewer snippet lines, no repo map, and no extra tool/stage guidance when that context would only add latency.
-- Recursive inspection and validation ignore environment noise such as `.git`, `.echo`, `.venv`, `venv`, `node_modules`, and common Python caches.
 
 ## Execution Model
 
@@ -145,16 +253,6 @@ Echo runs around a small staged runtime instead of a single free-form turn.
 
 The planner and runtime share the same stage model, so a failed stage is recorded as `failed` or `replanned` instead of silently disappearing.
 
-The runtime is intentionally split into small owners instead of a single giant loop.
-
-- `prepare.py`: resume seeding, inspection seeding, intake message construction, preflight decision
-- `model_loop.py`: request loop, retry gating, grounding retry, honest degradation after budget exhaustion
-- `backend_runtime.py`: backend request dispatch, timeout wrapping, backend activity, backend log mutation, request outcome normalization
-- `verify_flow.py`: auto-verify handoff from runtime into detected project validation
-- `finalize.py`: session closing, summary/materialization, artifact persistence
-- `trace.py`: runtime phase timing and compact request trace persistence
-- `request_shape.py`: compact description of the real backend request payload for latency auditing
-
 ## Memory Model
 
 Echo persists compact operational memory instead of replaying the whole transcript.
@@ -164,29 +262,20 @@ Echo persists compact operational memory instead of replaying the whole transcri
 - `operational summary`: confirmed facts, restrictions, stage progress, pending items
 - `cold memory`: long-session persistence without re-injecting irrelevant history
 
-## Runtime Trace
+Branch merge and cherry-pick operate directly on these memory layers — the merged session carries the consolidated artefacts forward as context for the next agent turn.
 
-Each persisted session keeps a compact runtime trace so slow or degraded runs stay auditable without replaying the full transcript.
+## Operational Notes
 
-- high-level phases: `prepare`, `preflight`, `execute`, `verify`, `finalize`
-- backend request trace: message count, role counts, effective timeout, tools enabled, request duration, outcome
-- request-shape fields: total chars, repo-map included or omitted, focus snippets present, compressed context, resumed context
-- final runtime outcome: retry count, degraded vs grounded, remaining budget, terminal reason
+- Echo stores runtime state, logs, memory, sessions, and branch metadata under `.echo/`.
+- `.gitignore` should exclude `.echo/` along with virtual environments and local secrets.
+- `doctor` shows cached, fresh, and effective backend state so routing decisions are auditable.
+- Session artifacts persist a `runtime_trace` with phase timings, backend request outcomes, retry count, grounding outcome, and remaining time budget.
+- Simple `ask` requests that target one or two explicit files are slimmed before backend dispatch.
+- Shell execution is constrained to a safe policy: no shell metacharacters, no `shell=True`, no destructive executables.
 
-This trace is written both into the session JSON and the runtime artifact under `.echo/artifacts/`.
+## Limitations
 
-## Useful Commands
-
-```bash
-echo-agent doctor
-echo-agent backend-check --chat-samples 2
-echo-agent ask "inspecciona echo/runtime/engine.py y explica el flujo"
-echo-agent plan "refuerza grounding y runtime"
-echo-agent resume "continúa desde la última sesión"
-echo-agent smoke "valida doctor, ask y resume"
-```
-
-## Tooling Scope
-
-- `search_text` uses `rg` when available and falls back to an internal Python search when it is not.
-- `search_symbol` and `find_symbol` are currently Python-only symbol searches. They do not claim general multi-language semantic indexing.
+- Natural language routing uses regex rules — complex or ambiguous sentences may fall through to conversation (safe default).
+- Cherry-pick from natural language defaults to `decisions + findings`; use the slash command for other artefact types.
+- The REPL uses single-line input; for long prompts use the slash command `/plan <text>` or `echocode shell` (which has multi-line Esc+Enter input).
+- Branch merge/cherry-pick do not merge raw transcripts, tool call logs, or message history — only structured artefacts.
