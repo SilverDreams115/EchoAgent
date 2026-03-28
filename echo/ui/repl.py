@@ -21,6 +21,7 @@ from queue import Empty, Queue
 from threading import Thread
 
 from prompt_toolkit import prompt as pt_prompt
+from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
@@ -38,39 +39,28 @@ from echo.types import ActivityEvent
 from echo.ui.intent_router import Intent, extract_artefacts, route
 
 _HELP_TEXT = """\
-[bold cyan]Echo conversational CLI[/bold cyan]
+[bold bright_cyan]echo[/bold bright_cyan] [dim]— cli conversacional[/dim]
 
-Escribe naturalmente — sin prefijos obligatorios.
+[dim]─────────────────────────────────────────────────────[/dim]
+[bold]teclado[/bold]
+  [cyan]Enter[/cyan]          [dim]enviar el mensaje[/dim]
+  [cyan]Alt+Enter[/cyan]      [dim]nueva línea  (Esc+Enter en cualquier terminal)[/dim]
+  [cyan]Ctrl+D[/cyan]         [dim]salir[/dim]
 
-[bold]Input:[/bold]
-  [cyan]Enter[/cyan]          → enviar el mensaje
-  [cyan]Alt + Enter[/cyan]    → nueva línea dentro del mensaje  (Esc+Enter en cualquier terminal)
-  [cyan]Ctrl + D[/cyan]       → salir de Echo
+[bold]comandos[/bold]
+  [dim]/help  /exit  /doctor[/dim]
+  [dim]/session status  /session new[/dim]
+  [dim]/branch status · list · new <n> · switch <n> · show <n>[/dim]
+  [dim]/branch merge <fuente> [--strategy union-deduplicate|prefer-source|prefer-destination][/dim]
+  [dim]/branch cherry-pick <fuente> [--decisions] [--findings] [--pending] [--facts] [--summary][/dim]
 
-[bold]Slash commands:[/bold]
-  [cyan]/help[/cyan]
-  [cyan]/exit[/cyan]
-  [cyan]/session status[/cyan]
-  [cyan]/session new[/cyan]
-  [cyan]/branch status[/cyan]
-  [cyan]/branch list[/cyan]
-  [cyan]/branch new <nombre>[/cyan]
-  [cyan]/branch switch <nombre>[/cyan]
-  [cyan]/branch show <nombre>[/cyan]
-  [cyan]/branch merge <fuente> [--strategy union-deduplicate|prefer-source|prefer-destination][/cyan]
-  [cyan]/branch cherry-pick <fuente> [--decisions] [--findings] [--pending] [--facts] [--summary][/cyan]
-  [cyan]/doctor[/cyan]
-
-[bold]Estrategias de merge:[/bold]
-  union-deduplicate (default) · prefer-source · prefer-destination
-
-[bold]Lenguaje natural (ejemplos):[/bold]
-  crea una rama experimento-shell
-  vuelve a main · cambia a feature-x
-  merge experimento-shell
-  trae las decisiones de experimento-shell
-  pásame los findings de feature-x
-  cherry-pick feature-x --summary --facts
+[bold]lenguaje natural[/bold]
+  [dim]crea una rama experimento-shell[/dim]
+  [dim]vuelve a main  ·  cambia a feature-x[/dim]
+  [dim]merge experimento-shell[/dim]
+  [dim]trae las decisiones de experimento-shell[/dim]
+  [dim]trae de esta rama a main solo findings[/dim]
+  [dim]pásame a main facts y findings de feature-x[/dim]
 """
 
 _ARTEFACT_FLAG_MAP: dict[str, str] = {
@@ -166,17 +156,15 @@ class EchoRepl:
             session_label = f"resumida · {self._current_session_id[:8]}"
         else:
             session_label = "nueva"
-        t = Text()
-        t.append("Echo", style="bold bright_cyan")
-        t.append("  ·  repo: ", style="dim white")
-        t.append(self.project_root.name, style="bold white")
-        t.append("  ·  branch: ", style="dim white")
-        t.append(branch, style="bold green")
-        t.append("  ·  session: ", style="dim white")
-        t.append(session_label, style="white")
-        self.console.print(Panel(t, border_style="bright_black", padding=(0, 1)))
+        title = (
+            f"[bold bright_cyan]echo[/bold bright_cyan]"
+            f"  [bright_black]·[/bright_black]  [bold]{self.project_root.name}[/bold]"
+            f"  [bright_black]·[/bright_black]  [bold green]{branch}[/bold green]"
+            f"  [bright_black]·[/bright_black]  [dim]{session_label}[/dim]"
+        )
+        self.console.rule(title, style="bright_black")
         self.console.print(
-            "[dim]Enter=enviar  ·  Alt+Enter=nueva línea  ·  /help=comandos  ·  Ctrl+D=salir[/dim]\n"
+            "[dim]Enter=enviar  ·  Alt+Enter=nueva línea  ·  /help  ·  Ctrl+D=salir[/dim]\n"
         )
 
     def _prompt_line(self) -> str | None:
@@ -189,7 +177,7 @@ class EchoRepl:
         kb = _build_chat_kb()
         try:
             result = pt_prompt(
-                f"[{branch}] > ",
+                HTML(f"<b><ansigreen>[{branch}]</ansigreen></b><ansidim> ❯ </ansidim>"),
                 history=history,
                 multiline=True,
                 key_bindings=kb,
@@ -258,11 +246,11 @@ class EchoRepl:
         rest = parts[1:]
 
         if cmd in {"/exit", "/quit"}:
-            self.console.print("Saliendo. Hasta luego.")
+            self.console.print("\n  [dim]hasta luego.[/dim]\n")
             sys.exit(0)
 
         if cmd == "/help":
-            self.console.print(Panel(_HELP_TEXT, title="Ayuda", border_style="cyan"))
+            self.console.print(Panel(_HELP_TEXT, title="[dim]ayuda[/dim]", border_style="bright_black", expand=False))
             return
 
         if cmd == "/doctor":
@@ -277,15 +265,15 @@ class EchoRepl:
             self._handle_branch_cmd(rest)
             return
 
-        self.console.print(f"[yellow]Comando desconocido: {cmd}. Usa /help.[/yellow]")
+        self.console.print(f"  [yellow]⚠[/yellow]  comando desconocido: {cmd}. Usa /help.")
 
     def _cmd_doctor(self) -> None:
         from rich.table import Table
 
         data = self.agent.doctor()
-        table = Table(title="Echo doctor")
-        table.add_column("Check", style="cyan")
-        table.add_column("Value", style="white")
+        table = Table(border_style="bright_black", show_header=True, header_style="dim")
+        table.add_column("check", style="cyan")
+        table.add_column("valor", style="white")
         for key, value in data.items():
             table.add_row(str(key), ", ".join(value) if isinstance(value, list) else str(value))
         self.console.print(table)
@@ -300,20 +288,20 @@ class EchoRepl:
         if sub == "status":
             status = self.agent.current_status()
             branch = self.branch_store.active_branch_name()
-            lines = [f"branch: [bold green]{branch}[/bold green]"]
-            lines += [f"{k}: {v}" for k, v in status.items()]
+            lines = [f"  [dim]branch    [/dim][bold green]{branch}[/bold green]"]
+            lines += [f"  [dim]{k:<9}[/dim]{v}" for k, v in status.items()]
             self.console.print(
-                Panel("\n".join(lines), title="Session Status", border_style="cyan", expand=False)
+                Panel("\n".join(lines), title="[dim]sesión[/dim]", border_style="bright_black", expand=False)
             )
             return
 
         if sub == "new":
             self._current_session_id = None
             branch = self.branch_store.active_branch_name()
-            self.console.print(f"[green]Nueva sesión limpia en branch '{branch}'.[/green]")
+            self.console.print(f"  [dim]◇  sesión nueva en[/dim] [bold green]{branch}[/bold green]")
             return
 
-        self.console.print(f"[yellow]Subcomando de session desconocido: {sub}. Usa /help.[/yellow]")
+        self.console.print(f"  [yellow]⚠[/yellow]  subcomando desconocido: {sub}. Usa /help.")
 
     # ------------------------------------------------------------------
     # /branch commands
@@ -329,7 +317,7 @@ class EchoRepl:
                 self._print_branch_info(self.branch_store.load_branch(name), active=True)
             else:
                 self.console.print(
-                    f"[yellow]Branch '{name}' no tiene metadata aún (se crea al primer uso).[/yellow]"
+                    f"  [dim]'{name}' sin metadata aún — se crea al primer uso.[/dim]"
                 )
             return
 
@@ -377,36 +365,39 @@ class EchoRepl:
             return
 
         self.console.print(
-            f"[yellow]Subcomando de branch desconocido: {sub}. Usa /help.[/yellow]"
+            f"  [yellow]⚠[/yellow]  subcomando de branch desconocido: {sub}. Usa /help."
         )
 
     def _cmd_branch_list(self) -> None:
         branches = self.branch_store.list_branches()
         active = self.branch_store.active_branch_name()
         if not branches:
-            self.console.print("[dim]No hay ramas todavía. Se crea 'main' automáticamente.[/dim]")
+            self.console.print("[dim]  no hay ramas todavía.[/dim]")
             return
+        self.console.print()
         for name in branches:
             if name == active:
-                self.console.print(f"  [bold green]* {name}[/bold green] [dim](active)[/dim]")
+                self.console.print(f"  [bold green]● {name}[/bold green]")
             else:
-                self.console.print(f"    {name}")
+                self.console.print(f"  [bright_black]○[/bright_black] [dim]{name}[/dim]")
+        self.console.print()
 
     def _print_branch_info(self, b: BranchState, active: bool = False) -> None:
-        active_marker = " [bold green](active)[/bold green]" if active else ""
+        active_marker = "  [bold green]active[/bold green]" if active else ""
         records = self.branch_store.load_merge_records(b.name)
-        text = (
-            f"[bold]{b.name}[/bold]{active_marker}\n"
-            f"created:        {b.created_at}\n"
-            f"parent:         {b.parent_branch or '(root)'}\n"
-            f"sessions:       {len(b.session_ids)}\n"
-            f"active session: {b.active_session_id or 'none'}\n"
-            f"merges:         {len(records)}\n"
-        )
+        sid = b.active_session_id[:8] if b.active_session_id else "—"
+        lines = [
+            f"[bold]{b.name}[/bold]{active_marker}",
+            f"  [dim]creada      [/dim]{b.created_at}",
+            f"  [dim]parent      [/dim]{b.parent_branch or '(root)'}",
+            f"  [dim]sesiones    [/dim]{len(b.session_ids)}",
+            f"  [dim]sesión act  [/dim]{sid}",
+            f"  [dim]merges      [/dim]{len(records)}",
+        ]
         if b.description:
-            text += f"description:    {b.description}\n"
+            lines.append(f"  [dim]desc        [/dim]{b.description}")
         self.console.print(
-            Panel(text, title=f"Branch: {b.name}", border_style="green", expand=False)
+            Panel("\n".join(lines), border_style="bright_black", expand=False, padding=(0, 1))
         )
 
     # ------------------------------------------------------------------
@@ -416,33 +407,38 @@ class EchoRepl:
     def _create_and_switch_branch(self, name: str) -> None:
         current = self.branch_store.active_branch_name()
         if self.branch_store.branch_exists(name):
-            self.console.print(f"[yellow]Branch '{name}' ya existe.[/yellow]")
+            self.console.print(f"  [yellow]⚠[/yellow]  '{name}' ya existe.")
         else:
             self.branch_store.create_branch(
                 name=name,
                 parent_branch=current,
                 parent_session_id=self._current_session_id or "",
             )
-            self.console.print(f"[green]Branch '{name}' creado desde '{current}'.[/green]")
+            self.console.print(
+                f"  [bright_black]◇[/bright_black]  [bold green]{name}[/bold green]"
+                f"  [dim]desde {current}[/dim]"
+            )
         self.branch_store.set_active_branch(name)
         self._current_session_id = self.branch_store.active_session_for_branch(name)
-        session_label = self._current_session_id or "nueva"
+        session_label = self._current_session_id[:8] if self._current_session_id else "nueva"
         self.console.print(
-            f"[green]→ Ahora en branch '[bold]{name}[/bold]'.  Sesión: {session_label}[/green]"
+            f"  [dim]→  [/dim][bold green]{name}[/bold green]"
+            f"  [dim]·  sesión: {session_label}[/dim]"
         )
 
     def _switch_branch(self, name: str) -> None:
         if not self.branch_store.branch_exists(name):
             self.console.print(
-                f"[red]Branch '{name}' no existe.[/red] "
-                f"Usa [cyan]/branch new {name}[/cyan] para crearlo."
+                f"  [red]✗[/red]  '{name}' no existe.  "
+                f"[dim]usa /branch new {name} para crearlo.[/dim]"
             )
             return
         self.branch_store.set_active_branch(name)
         self._current_session_id = self.branch_store.active_session_for_branch(name)
-        session_label = self._current_session_id or "nueva"
+        session_label = self._current_session_id[:8] if self._current_session_id else "nueva"
         self.console.print(
-            f"[green]→ Cambiado a branch '[bold]{name}[/bold]'.  Sesión: {session_label}[/green]"
+            f"  [dim]→  [/dim][bold green]{name}[/bold green]"
+            f"  [dim]·  sesión: {session_label}[/dim]"
         )
 
     def _do_merge(
@@ -455,18 +451,21 @@ class EchoRepl:
         # Fall back to the active branch when the phrase has no destination suffix.
         dest = destination or self.branch_store.active_branch_name()
         if source == dest:
-            self.console.print("[yellow]No puedes hacer merge de una rama consigo misma.[/yellow]")
+            self.console.print("  [yellow]⚠[/yellow]  no puedes hacer merge de una rama consigo misma.")
             return
         if not self.branch_store.branch_exists(source):
-            self.console.print(f"[red]Branch fuente '{source}' no existe.[/red]")
+            self.console.print(f"  [red]✗[/red]  '{source}' no existe.")
             return
         valid = {"union-deduplicate", "prefer-source", "prefer-destination"}
         if strategy not in valid:
             self.console.print(
-                f"[red]Estrategia '{strategy}' inválida. Válidas: {', '.join(sorted(valid))}[/red]"
+                f"  [red]✗[/red]  estrategia '{strategy}' inválida.  "
+                f"[dim]válidas: {', '.join(sorted(valid))}[/dim]"
             )
             return
-        self.console.print(f"[cyan]Mergeando '{source}' → '{dest}' [{strategy}]…[/cyan]")
+        self.console.print(
+            f"  [dim]⊕  merge  {source} → {dest}  [{strategy}]…[/dim]"
+        )
         try:
             record, new_session = merge_branches(
                 source_branch=source,
@@ -478,7 +477,7 @@ class EchoRepl:
             self._current_session_id = new_session.id
             self._print_op_result(record)
         except ValueError as exc:
-            self.console.print(f"[red]Error en merge:[/red] {exc}")
+            self.console.print(f"  [red]✗[/red]  merge: {exc}")
 
     def _do_cherry_pick(
         self,
@@ -488,15 +487,14 @@ class EchoRepl:
     ) -> None:
         dest = destination or self.branch_store.active_branch_name()
         if source == dest:
-            self.console.print(
-                "[yellow]No puedes cherry-pick de una rama consigo misma.[/yellow]"
-            )
+            self.console.print("  [yellow]⚠[/yellow]  no puedes cherry-pick de una rama consigo misma.")
             return
         if not self.branch_store.branch_exists(source):
-            self.console.print(f"[red]Branch fuente '{source}' no existe.[/red]")
+            self.console.print(f"  [red]✗[/red]  '{source}' no existe.")
             return
         self.console.print(
-            f"[cyan]Cherry-pick '{source}' → '{dest}': {', '.join(artefact_types)}…[/cyan]"
+            f"  [dim]◆  cherry-pick  {source} → {dest}"
+            f"  [{', '.join(artefact_types)}]…[/dim]"
         )
         try:
             record, new_session = cherry_pick(
@@ -509,27 +507,26 @@ class EchoRepl:
             self._current_session_id = new_session.id
             self._print_op_result(record, is_cherry_pick=True)
         except ValueError as exc:
-            self.console.print(f"[red]Error en cherry-pick:[/red] {exc}")
+            self.console.print(f"  [red]✗[/red]  cherry-pick: {exc}")
 
     def _print_op_result(
         self, record: BranchMergeRecord, is_cherry_pick: bool = False
     ) -> None:
-        op = "Cherry-pick" if is_cherry_pick else "Merge"
+        op = "cherry-pick" if is_cherry_pick else "merge"
         total_in = sum(len(v) for v in record.items_merged.values())
         total_conf = sum(len(v) for v in record.conflicts.values())
-        lines = [
-            f"[green]{op} completado.[/green]  ID: [dim]{record.merge_id}[/dim]",
-            f"[dim]{record.source_branch} → {record.destination_branch}  strategy={record.strategy}[/dim]",
-            f"Items incorporados: {total_in}",
-        ]
-        for atype, items in record.items_merged.items():
-            lines.append(f"  [cyan]{atype}[/cyan]: {len(items)}")
-        if total_conf:
-            lines.append(f"[yellow]Conflictos: {total_conf}[/yellow]")
-        lines.append(f"Nueva sesión: [dim]{record.destination_session_id}[/dim]")
+        sid = record.destination_session_id[:8] if record.destination_session_id else "?"
         self.console.print(
-            Panel("\n".join(lines), title=f"{op}", border_style="green", expand=False)
+            f"  [green]✓[/green]  [bold]{op}[/bold]"
+            f"  [dim]{record.source_branch} → {record.destination_branch}[/dim]"
+            f"  [dim]({total_in} items)[/dim]"
         )
+        for atype, items in record.items_merged.items():
+            if items:
+                self.console.print(f"     [dim cyan]{atype}[/dim cyan] [dim]{len(items)}[/dim]")
+        if total_conf:
+            self.console.print(f"  [yellow]⚠  {total_conf} conflictos[/yellow]")
+        self.console.print(f"  [dim]sesión → {sid}[/dim]")
 
     # ------------------------------------------------------------------
     # Natural language intent dispatch
@@ -590,11 +587,11 @@ class EchoRepl:
             return True
 
         elif intent == "exit":
-            self.console.print("Saliendo. Hasta luego.")
+            self.console.print("\n  [dim]hasta luego.[/dim]\n")
             sys.exit(0)
 
         elif intent == "help":
-            self.console.print(Panel(_HELP_TEXT, title="Ayuda", border_style="cyan"))
+            self.console.print(Panel(_HELP_TEXT, title="[dim]ayuda[/dim]", border_style="bright_black", expand=False))
             return True
 
         return False
@@ -608,7 +605,7 @@ class EchoRepl:
         while True:
             text = self._prompt_line()
             if text is None:
-                self.console.print("\nSaliendo. Hasta luego.")
+                self.console.print("\n  [dim]hasta luego.[/dim]\n")
                 break
             text = text.strip()
             if not text:
@@ -631,5 +628,7 @@ class EchoRepl:
             answer = self._run_agent_turn(text)
             if answer:
                 self.console.print()
-                self.console.print(f"[bold bright_cyan]Echo:[/bold bright_cyan] {answer}")
+                self.console.rule("[bold bright_cyan]echo[/bold bright_cyan]", align="left", style="bright_black")
+                self.console.print()
+                self.console.print(f"  {answer}")
                 self.console.print()
