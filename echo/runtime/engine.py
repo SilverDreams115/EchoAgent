@@ -24,7 +24,7 @@ from echo.runtime.budget import RuntimeBudget, build_runtime_budget
 from echo.runtime.finalize import finalize_session
 from echo.runtime.memory_sync import confirmed_facts, sync_memory_layers
 from echo.runtime.model_loop import run_model_loop
-from echo.runtime.outcomes import build_degraded_answer, build_heuristic_plan, build_resume_local_answer, is_resume_summary_only
+from echo.runtime.outcomes import build_degraded_answer, build_heuristic_plan, build_local_inspect_answer, build_resume_local_answer, is_resume_summary_only
 from echo.runtime.prepare import build_intake_messages, evaluate_preflight, resume_seed, seed_inspection
 from echo.runtime.stages import find_stage, initialize_plan, plan_guidance_message, replan_stage, set_current_stage, update_stage
 from echo.runtime.trace import record_backend_request, record_runtime_phase, runtime_trace_payload, update_runtime_outcome
@@ -442,6 +442,9 @@ class AgentRuntime:
     def _resume_summary_only(self, prompt: str) -> bool:
         return is_resume_summary_only(prompt)
 
+    def _local_inspect_answer(self, session: SessionState, run_state: RunState) -> str:
+        return build_local_inspect_answer(session, run_state, activity=self.activity)
+
     def _resume_local_answer(self, session: SessionState, run_state: RunState) -> str:
         return build_resume_local_answer(session, run_state, activity=self.activity)
 
@@ -512,6 +515,7 @@ class AgentRuntime:
             call_backend=self._call_backend_with_timeout,
             extract_tool_calls=self._extract_tool_calls,
             degraded_answer=self._degraded_answer,
+            local_inspect_answer=self._local_inspect_answer,
             update_stage=self._update_stage,
             replan_stage=self._replan_stage,
             reduce_context=self._reduce_context,

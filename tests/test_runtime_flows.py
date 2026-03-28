@@ -467,7 +467,7 @@ class RuntimeFlowTests(unittest.TestCase):
         runtime, _ = self._runtime(backend)
         answer, _, session, run_state = runtime.run("inspecciona echo/sample.py y responde", mode="ask")
         self.assertEqual(backend.calls, 1)
-        self.assertIn("timeout", answer.lower())
+        self.assertIn("backend", answer.lower())  # user-facing degraded message
         self.assertEqual(run_state.retry_count, 0)
         self.assertTrue(session.degraded_reason)
 
@@ -568,7 +568,7 @@ class RuntimeFlowTests(unittest.TestCase):
     def test_finalize_persists_runtime_artifact_and_session_trace_after_degraded_run(self) -> None:
         runtime, store = self._runtime(UnreachableBackend([]))
         answer, session_path, session, _ = runtime.run("inspecciona echo/sample.py", mode="ask")
-        self.assertIn("no pudo cerrar con el backend", answer)
+        self.assertIn("backend", answer.lower())  # user-facing degraded message
         self.assertTrue(session_path.exists())
         runtime_artifact = self.root / ".echo" / "artifacts" / f"{session.id}-runtime.json"
         self.assertTrue(runtime_artifact.exists())
@@ -737,8 +737,9 @@ class RuntimeFlowTests(unittest.TestCase):
             ]
         )
         runtime, _ = self._runtime(backend)
-        answer, _, _, _ = runtime.run("inspecciona echo/sample.py", mode="ask")
-        self.assertIn("Etapa detenida:", answer)
+        answer, _, session, _ = runtime.run("inspecciona echo/sample.py", mode="ask")
+        self.assertTrue(session.degraded_reason)  # degradation was recorded
+        self.assertIn("backend", answer.lower())  # user-facing message, no internal dump
 
     def test_generic_model_answer_degrades_honestly_after_retry(self) -> None:
         backend = FakeBackend(
@@ -749,7 +750,7 @@ class RuntimeFlowTests(unittest.TestCase):
         )
         runtime, _ = self._runtime(backend)
         answer, _, session, run_state = runtime.run("inspecciona el repo", mode="ask")
-        self.assertIn("Echo reunió inspección local", answer)
+        self.assertIn("backend", answer.lower())  # user-facing degraded message
         self.assertFalse(session.grounded_answer)
         self.assertFalse(run_state.grounding_report.valid)
         self.assertTrue(session.degraded_reason)
@@ -763,7 +764,7 @@ class RuntimeFlowTests(unittest.TestCase):
         )
         runtime, _ = self._runtime(backend)
         answer, _, session, run_state = runtime.run("inspecciona echo/sample.py", mode="ask")
-        self.assertIn("Echo reunió inspección local", answer)
+        self.assertIn("backend", answer.lower())  # user-facing degraded message
         self.assertFalse(session.grounded_answer)
         self.assertFalse(run_state.grounding_report.valid)
         self.assertGreaterEqual(run_state.retry_count, 1)
@@ -945,7 +946,7 @@ class RuntimeFlowTests(unittest.TestCase):
         backend = UnreachableBackend([])
         runtime, _ = self._runtime(backend)
         answer, _, _, run_state = runtime.run("inspecciona echo/sample.py", mode="ask")
-        self.assertIn("Echo reunió inspección local", answer)
+        self.assertIn("backend", answer.lower())  # user-facing degraded message
         self.assertFalse(run_state.backend_health.backend_chat_ready)
         self.assertEqual(run_state.backend_health.backend_state, "unreachable")
         self.assertTrue(run_state.fallback_used)

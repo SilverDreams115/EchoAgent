@@ -25,6 +25,7 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
+from rich import box
 from rich.live import Live
 from rich.panel import Panel
 from rich.spinner import Spinner
@@ -150,22 +151,64 @@ class EchoRepl:
     # Header + prompt
     # ------------------------------------------------------------------
 
-    def _print_header(self) -> None:
+    def _short_session_id(self, session_id: str | None) -> str:
+        if not session_id:
+            return ""
+        compact = session_id.removeprefix("session-")
+        return compact[:8] or session_id[:8]
+
+    def _header_panel(self) -> Panel:
         branch = self.branch_store.active_branch_name()
         if self._session_resumed and self._current_session_id:
-            session_label = f"resumida · {self._current_session_id[:8]}"
+            session_label = f"resumida · {self._short_session_id(self._current_session_id)}"
         else:
             session_label = "nueva"
-        title = (
-            f"[bold bright_cyan]echo[/bold bright_cyan]"
-            f"  [bright_black]·[/bright_black]  [bold]{self.project_root.name}[/bold]"
-            f"  [bright_black]·[/bright_black]  [bold green]{branch}[/bold green]"
-            f"  [bright_black]·[/bright_black]  [dim]{session_label}[/dim]"
+        title = Text()
+        title.append(" EchoAgent ", style="bold bright_cyan")
+        title.append("·", style="bright_black")
+        title.append(f" {self.project_root.name} ", style="white")
+
+        body = Text()
+        body.append("branch", style="bright_black")
+        body.append(" ")
+        body.append(branch, style="green")
+        body.append("   ")
+        body.append("session", style="bright_black")
+        body.append(" ")
+        body.append(session_label, style="white")
+        body.append("\n")
+        body.append("enter envia", style="bright_black")
+        body.append("  ·  ", style="bright_black")
+        body.append("esc+enter nueva linea", style="bright_black")
+        body.append("  ·  ", style="bright_black")
+        body.append("/help", style="bright_black")
+        body.append("  ·  ", style="bright_black")
+        body.append("ctrl+d salir", style="bright_black")
+        return Panel(
+            body,
+            title=title,
+            border_style="grey35",
+            box=box.ROUNDED,
+            expand=False,
+            padding=(0, 1),
         )
-        self.console.rule(title, style="bright_black")
-        self.console.print(
-            "[dim]Enter=enviar  ·  Alt+Enter=nueva línea  ·  /help  ·  Ctrl+D=salir[/dim]\n"
+
+    def _composer_prompt(self, branch: str) -> HTML:
+        return HTML(
+            "<ansibrightblack>╭─</ansibrightblack>"
+            f"<b><ansicyan>you</ansicyan></b> <ansigreen>{branch}</ansigreen>\n"
+            "<ansibrightblack>╰─› </ansibrightblack>"
         )
+
+    def _composer_toolbar(self) -> HTML:
+        return HTML(
+            "<style fg=\"#6c757d\">Enter envia  ·  Esc+Enter nueva linea  ·  /help</style>"
+        )
+
+    def _print_header(self) -> None:
+        self.console.print()
+        self.console.print(self._header_panel())
+        self.console.print()
 
     def _prompt_line(self) -> str | None:
         if self._input_fn is not None:
@@ -177,11 +220,12 @@ class EchoRepl:
         kb = _build_chat_kb()
         try:
             result = pt_prompt(
-                HTML(f"<b><ansigreen>[{branch}]</ansigreen></b><ansidim> ❯ </ansidim>"),
+                self._composer_prompt(branch),
                 history=history,
                 multiline=True,
                 key_bindings=kb,
-                prompt_continuation="  ↳ ",
+                prompt_continuation="  │ ",
+                bottom_toolbar=self._composer_toolbar(),
             )
             return result
         except (EOFError, KeyboardInterrupt):
@@ -628,7 +672,7 @@ class EchoRepl:
             answer = self._run_agent_turn(text)
             if answer:
                 self.console.print()
-                self.console.rule("[bold bright_cyan]echo[/bold bright_cyan]", align="left", style="bright_black")
+                self.console.print("[bright_black]─[/bright_black] [bold bright_cyan]echo[/bold bright_cyan]")
                 self.console.print()
                 self.console.print(f"  {answer}")
                 self.console.print()

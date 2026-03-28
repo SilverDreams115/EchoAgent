@@ -46,6 +46,8 @@ Cherry-pick 'experimento-shell' → 'main': decisions, findings…
 - uses `local`, `balanced`, and `deep` execution profiles
 - preserves resumable working state with compression and memory summaries
 - degrades cleanly when the backend is unavailable or unstable
+- avoids repeating the same improvement list in local fallback follow-ups by remembering proposals already emitted per session/branch
+- escalates local fallback suggestions progressively from base hygiene to structural and product-oriented improvements
 - verifies final answers against observed repo evidence, tool output, and executed validation
 - maintains **conversational branches** with merge and cherry-pick of structured context
 
@@ -54,15 +56,18 @@ Cherry-pick 'experimento-shell' → 'main': decisions, findings…
 `echo-agent` opens a REPL directly — no subcommands, no menus.
 
 ```
-╭──────────────────────────────────────────────────────────────────────╮
-│ Echo  ·  repo: my-project  ·  branch: main  ·  session: resumida · a1b2c3d4 │
-╰──────────────────────────────────────────────────────────────────────╯
-Enter=enviar  ·  Alt+Enter=nueva línea  ·  /help=comandos  ·  Ctrl+D=salir
+╭──────────────────────────── EchoAgent · my-project ───────────────────────────╮
+│ branch main   session resumida · a1b2c3d4                                     │
+│ enter envia  ·  esc+enter nueva linea  ·  /help  ·  ctrl+d salir              │
+╰───────────────────────────────────────────────────────────────────────────────╯
 
-[main] >
+╭─ you main
+╰─› 
 ```
 
 The session and active branch are loaded automatically from `.echo/`. Each turn is persisted and linked to the previous one via `parent_session_id`.
+
+When the backend falls back to local inspection, Echo also remembers which improvement proposals were already shown in the current session/branch. Follow-ups such as `otra propuesta`, `otra aparte de esas 4` or `algo más avanzado` produce new grounded suggestions instead of replaying the same base list.
 
 ### Input model
 

@@ -309,6 +309,9 @@ def test_header_shows_resumida_when_session_exists(tmp_path: Path) -> None:
     assert "resumida" in output, (
         f"Expected 'resumida' in header when session exists. Got:\n{output}"
     )
+    assert "EchoAgent" in output
+    assert "branch" in output
+    assert "session" in output
     # "nueva" must not appear as the session label.
     # Note: the hint line legitimately contains "nueva línea" — we check the
     # session-label region specifically by verifying "resumida" is present and
@@ -336,7 +339,7 @@ def test_header_shows_nueva_when_no_prior_session(tmp_path: Path) -> None:
 
 
 def test_header_shows_enter_to_send_hint(tmp_path: Path) -> None:
-    """The hint line must document Enter=enviar (not Esc+Enter=enviar)."""
+    """The compact hint line must still document Enter=send and Esc+Enter=newline."""
     agent = _make_agent_stub(tmp_path=tmp_path)
     console, buf = _capture_console(tmp_path)
 
@@ -344,11 +347,34 @@ def test_header_shows_enter_to_send_hint(tmp_path: Path) -> None:
     repl._print_header()
 
     output = buf.getvalue()
-    assert "Enter=enviar" in output, (
-        f"Hint must say 'Enter=enviar'. Got:\n{output}"
+    assert "enter envia" in output.lower(), (
+        f"Hint must say 'enter envia'. Got:\n{output}"
     )
-    # Must NOT say Esc+Enter=enviar (that was the old, inverted binding)
-    assert "Esc+Enter=enviar" not in output
+    assert "esc+enter nueva linea" in output.lower()
+    assert "Alt+Enter=nueva línea" not in output
+
+
+def test_short_session_id_drops_session_prefix(tmp_path: Path) -> None:
+    agent = _make_agent_stub(tmp_path=tmp_path)
+    repl = _make_repl(tmp_path, agent=agent)
+    assert repl._short_session_id("session-abcd1234efgh") == "abcd1234"
+
+
+def test_prompt_uses_composer_layout_and_toolbar(tmp_path: Path) -> None:
+    """Interactive prompt should use the cleaner composer prompt and subtle toolbar."""
+    agent = _make_agent_stub(tmp_path=tmp_path)
+    repl = _make_repl(tmp_path, agent=agent)
+
+    with patch("echo.ui.repl.pt_prompt", return_value="hola") as mock_prompt:
+        result = repl._prompt_line()
+
+    assert result == "hola"
+    kwargs = mock_prompt.call_args.kwargs
+    message = str(mock_prompt.call_args.args[0])
+    assert "you" in message.lower()
+    assert "╰─›" in message
+    assert kwargs["prompt_continuation"] == "  │ "
+    assert "Enter envia" in str(kwargs["bottom_toolbar"])
 
 
 # ---------------------------------------------------------------------------

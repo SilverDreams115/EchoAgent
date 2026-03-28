@@ -45,6 +45,7 @@ def run_model_loop(
     call_backend,
     extract_tool_calls,
     degraded_answer,
+    local_inspect_answer,
     update_stage,
     replan_stage,
     reduce_context,
@@ -146,7 +147,7 @@ def run_model_loop(
         if not tool_calls:
             if mode == "ask" and len(session.tool_calls) == 0:
                 run_state.open_issues.append("ask completed without real tool execution")
-                return degraded_answer(session, run_state, "El pipeline no ejecutó herramientas reales antes de responder.", mode)
+                return local_inspect_answer(session, run_state)
             valid, reason, report = validate_final_answer(
                 content,
                 profile=profile,

@@ -165,6 +165,8 @@ class SessionState:
     findings: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)
     changed_files: list[str] = field(default_factory=list)
+    emitted_improvement_ids: list[str] = field(default_factory=list)
+    emitted_improvement_layers: list[str] = field(default_factory=list)
     plan_stages: list[PlanStage] = field(default_factory=list)
     current_stage_id: str = ""
     working_memory: WorkingMemory = field(default_factory=WorkingMemory)

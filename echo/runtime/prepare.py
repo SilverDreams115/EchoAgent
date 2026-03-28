@@ -93,6 +93,8 @@ def resume_seed(
     session.findings = list(loaded.operational_memory.confirmed_facts or loaded.findings)
     session.pending = list(loaded.operational_memory.pending or loaded.pending)
     session.changed_files = list(loaded.episodic_memory.changes or loaded.changed_files)
+    session.emitted_improvement_ids = list(loaded.emitted_improvement_ids)
+    session.emitted_improvement_layers = list(loaded.emitted_improvement_layers)
     session.errors = list(loaded.episodic_memory.errors or loaded.errors)
     session.validation = list(loaded.episodic_memory.validations or loaded.validation)
     session.plan_stages = list(loaded.plan_stages)
