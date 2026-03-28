@@ -14,7 +14,27 @@ FILE_PATTERN = re.compile(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+")
 SYMBOL_CLAIM_PATTERN = re.compile(r"\b(?:función|funcion|clase|método|metodo|símbolo|simbolo)\s+([A-Za-z_][A-Za-z0-9_]*)", re.IGNORECASE)
 BACKTICK_SYMBOL_PATTERN = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)`")
 COMMAND_CLAIM_PATTERN = re.compile(r"`([^`\n]+)`")
-NON_SYMBOL_WORDS = {"concreto", "real", "principal", "correcto", "breve"}
+
+# Bug A: words that follow "función/método/clase X" in natural Spanish prose
+# but are NOT function/class names.  Minimum-length guard (≥4) plus this set.
+NON_SYMBOL_WORDS = {
+    "concreto", "real", "principal", "correcto", "breve",
+    # conjunctions / prepositions frequently captured as "función que …"
+    "que", "del", "para", "con", "una", "los", "las", "por",
+    # Spanish verbs/adjectives that describe a function without naming it
+    "devuelve", "retorna", "recibe", "acepta", "permite", "usa",
+    "llamada", "llamado", "definida", "definido", "declarada",
+}
+
+# Bug B: Python built-ins and keywords that appear legitimately in backticks
+# but are NOT project-specific symbols and will never be in evidence.symbols.
+_PYTHON_BUILTINS: frozenset[str] = frozenset({
+    "True", "False", "None",
+    "self", "cls", "args", "kwargs",
+    "classmethod", "staticmethod", "property",
+    "str", "int", "float", "bool", "list", "dict", "set", "tuple",
+    "type", "object",
+})
 
 
 @dataclass(slots=True)
@@ -115,11 +135,24 @@ def collect_tool_evidence(tool_calls: list[ToolCallRecord] | None, tool_result_p
 
 def extract_claims(text: str) -> VerifierClaims:
     files = set(FILE_PATTERN.findall(text or ""))
-    symbols = {match.group(1) for match in SYMBOL_CLAIM_PATTERN.finditer(text or "")}
+
+    # Bug A fix: require min length ≥4 so short Spanish words ("que", "es",
+    # "bas") from "función X" pattern are dropped before the NON_SYMBOL_WORDS
+    # filter even runs.
+    symbols = {
+        match.group(1)
+        for match in SYMBOL_CLAIM_PATTERN.finditer(text or "")
+        if len(match.group(1)) >= 4
+    }
+
+    # Bug B fix: exclude Python built-ins/keywords from backtick symbols; they
+    # will never appear in evidence.symbols and cause false grounding failures.
     symbols.update(
         match.group(1)
         for match in BACKTICK_SYMBOL_PATTERN.finditer(text or "")
-        if len(match.group(1)) >= 3 and ("_" in match.group(1) or any(ch.isupper() for ch in match.group(1)))
+        if len(match.group(1)) >= 3
+        and match.group(1) not in _PYTHON_BUILTINS
+        and ("_" in match.group(1) or any(ch.isupper() for ch in match.group(1)))
     )
     commands = {match.group(1).strip() for match in COMMAND_CLAIM_PATTERN.finditer(text or "") if " " in match.group(1).strip()}
     return VerifierClaims(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import typer
@@ -16,6 +17,50 @@ app = typer.Typer(help="Echo local coding agent")
 console = Console()
 
 
+def _looks_like_project_root(path: Path) -> bool:
+    """True if *path* has the EchoAgent project sentinels."""
+    return (path / "pyproject.toml").exists() and (path / "echo").is_dir()
+
+
+def resolve_project_root(cwd: Path) -> Path:
+    """
+    Resolve the project root from *cwd* without looking downward.
+
+    Strategy:
+    1. ``git rev-parse --show-toplevel`` — trusts the Git boundary when available.
+    2. Walk *upward* from *cwd* looking for a directory that has both
+       ``pyproject.toml`` and an ``echo/`` package (EchoAgent sentinels).
+    3. Fall back to *cwd* as-is if nothing is found.
+
+    When running from an ambiguous parent that contains multiple sibling
+    repos (e.g. ``out/`` and ``head-check/``), git lookup will fail because
+    the parent is not itself a repo, and the sentinel walk-up will also fail
+    because the parent has no ``pyproject.toml``.  The caller is responsible
+    for warning the user in that case.
+    """
+    # 1. Git boundary
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return Path(result.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    # 2. Sentinel walk-up
+    for candidate in (cwd, *cwd.parents):
+        if _looks_like_project_root(candidate):
+            return candidate
+
+    # 3. Fallback
+    return cwd
+
+
 def profile_option() -> str | None:
     return typer.Option(None, "--profile", help="Execution profile: local, balanced, deep, auto")
 
@@ -28,7 +73,17 @@ def build_agent(
     profile: str | None = None,
     strict_profile: bool = False,
 ) -> tuple[EchoAgent, Path, Settings]:
-    root = Path(project_dir).resolve() if project_dir else Path.cwd().resolve()
+    if project_dir:
+        root = Path(project_dir).resolve()
+    else:
+        cwd = Path.cwd().resolve()
+        root = resolve_project_root(cwd)
+        if root == cwd and not _looks_like_project_root(root):
+            console.print(
+                f"[yellow]Advertencia:[/yellow] No se detectó un proyecto EchoAgent en "
+                f"[white]{cwd}[/white].\n"
+                "  Ejecuta desde la raíz del proyecto o usa [cyan]--project-dir DIR[/cyan]."
+            )
     settings = Settings.from_env()
     if profile:
         settings.profile = profile

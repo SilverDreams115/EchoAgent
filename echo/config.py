@@ -22,6 +22,10 @@ class Settings:
     ollama_url: str = "http://localhost:11434"
     openai_url: str = "https://api.openai.com/v1"
     openai_api_key: str = ""
+    # Total session budget in seconds shared across all model calls in the
+    # pipeline.  120 s is appropriate for fast API backends (GPT-4, etc.).
+    # Heavy local models (qwen 7B+ at ~65-168 s/call) require a higher value;
+    # override with ECHO_BACKEND_TIMEOUT=300 in that case.
     backend_timeout: int = 120
     ollama_keep_alive: str = "10m"
     backend_preflight_timeout: int = 8
