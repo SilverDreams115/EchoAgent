@@ -19,19 +19,26 @@ echo-agent          # opens the conversational REPL directly
 Inside the REPL:
 
 ```
-[main] > revisa el runtime y dime qué falla
-Echo: <respuesta del agente>
+╭─ you main
+╰─› revisa el runtime y dime qué falla
+─ echo
+  <respuesta del agente>
 
-[main] > crea una rama experimento-shell
+╭─ you main
+╰─› crea una rama experimento-shell
 → Branch 'experimento-shell' creado desde 'main'. Sesión: nueva
 
-[experimento-shell] > en esta rama intenta rediseñar el shell
-Echo: <respuesta del agente>
+╭─ you experimento-shell
+╰─› en esta rama intenta rediseñar el shell
+─ echo
+  <respuesta del agente>
 
-[experimento-shell] > vuelve a main
-→ Cambiado a branch 'main'. Sesión: session-abc123
+╭─ you experimento-shell
+╰─› vuelve a main
+→ Cambiado a branch 'main'. Sesión: resumida · abcd1234
 
-[main] > trae las decisiones de experimento-shell
+╭─ you main
+╰─› trae las decisiones de experimento-shell
 Cherry-pick 'experimento-shell' → 'main': decisions, findings…
 ```
 
@@ -79,11 +86,12 @@ When the backend falls back to local inspection, Echo also remembers which impro
 
 Multiline example:
 ```
-[main] > analiza el módulo de runtime:
-  ↳ - enfócate en los stages y el retry logic
-  ↳ - dime si hay deuda técnica obvia
+╭─ you main
+╰─› analiza el módulo de runtime:
+  │ - enfócate en los stages y el retry logic
+  │ - dime si hay deuda técnica obvia
 ```
-*(Alt+Enter agrega cada `↳`; Enter al final envía todo como un solo mensaje)*
+*(Esc+Enter agrega cada nueva línea; Alt+Enter funciona como equivalente según la terminal. Enter al final envía todo como un solo mensaje.)*
 
 The `session:` field in the header shows:
 - `nueva` — no prior session found for this branch (fresh start)
@@ -102,7 +110,7 @@ The `session:` field in the header shows:
 /branch switch <name>
 /branch show <name>
 /branch merge <source> [--strategy union-deduplicate|prefer-source|prefer-destination]
-/branch cherry-pick <source> [--decisions] [--findings] [--pending] [--facts] [--summary]
+/branch cherry-pick <source> [--decisions] [--findings] [--pending] [--facts] [--summary] [--errors] [--changes]
 /doctor
 ```
 
@@ -182,17 +190,21 @@ Each branch is independent. Sessions are tracked per branch under `.echo/branche
 ```bash
 echo-agent
 
-[main] > /branch new experiment
+╭─ you main
+╰─› /branch new experiment
 → Branch 'experiment' creado desde 'main'. Sesión: nueva
 
-[experiment] > /branch list
+╭─ you experiment
+╰─› /branch list
   * experiment  (active)
     main
 
-[experiment] > /branch switch main
+╭─ you experiment
+╰─› /branch switch main
 → Cambiado a branch 'main'.
 
-[main] > /branch show experiment
+╭─ you main
+╰─› /branch show experiment
 ╭─ Branch: experiment ──────────────────────╮
 │ created: 2026-03-27T...                   │
 │ parent:  main                             │
