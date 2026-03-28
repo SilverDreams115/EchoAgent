@@ -37,8 +37,25 @@ Merge vs cherry-pick signal model:
   patterns ("a main", "en main", etc.).  When a destination is present,
   route() injects it as values["destination"] so the REPL can override the
   default active-branch target.  Artefact extraction runs on the full text
-  and is not affected by the trailing destination suffix because artefact
-  keywords never overlap with branch names or prepositions.
+  and is not affected by the destination because artefact keywords never
+  overlap with branch names or prepositions.
+
+Component order flexibility in cherry-pick:
+- The router supports multiple natural orderings of source, destination, and
+  artefacts without any loss of determinism.
+- Forma 1/3: artefacts before source, optional destination at end.
+    "trae las decisiones de X [a main]"
+    "incorpora findings de X [en main]"
+- Forma 2 (new): source before destination, artefacts at end (or absent).
+    "trae de X a main solo findings"
+    "pásame de X a main facts y findings"
+    "cherry-pick de X a main solo decisions"  ← destination extractor fix
+- Forma 4 (new): destination immediately after verb, artefacts, then source.
+    "trae a main las decisiones de X"
+    "dame a main solo findings de X"
+- The destination is extracted by extract_destination(), which uses a
+  lookahead (not end-of-string anchor) so it finds "a main" regardless of
+  whether artefact tokens follow it.
 
 Contextual source resolution:
 - route() accepts an optional active_branch parameter.
@@ -84,8 +101,14 @@ _BRANCH_REF = r"[a-zA-Z0-9][a-zA-Z0-9_\-]{1,}"
 _DEST_SUFFIX = r"(?:\s+(?:a|hacia|en|con|dentro\s+de)\s+" + _BRANCH_REF + r")?"
 
 # Capturing version of the destination suffix — used by extract_destination().
+#
+# Uses a lookahead (?=\s|$) instead of \s*$ so it finds "a main" even when
+# artefact tokens follow the destination (e.g. "cherry-pick de X a main solo
+# decisions").  The first match in the string is returned, which is the most
+# natural interpretation when the user writes the destination before the
+# artefacts.
 _DEST_BRANCH_RE = re.compile(
-    r"\s+(?:a|hacia|en|con|dentro\s+de)\s+(" + _BRANCH_REF + r")\s*$",
+    r"\s+(?:a|hacia|en|con|dentro\s+de)\s+(" + _BRANCH_REF + r")(?=\s|$)",
     re.IGNORECASE,
 )
 
@@ -453,6 +476,60 @@ def _cherry_bare(m, _): return {"source": m.group(1), "artefacts": []}
 )
 def _cherry_with_flags(m, text):
     return {"source": m.group(1), "artefacts": extract_artefacts(m.group(2))}
+
+# ---------------------------------------------------------------------------
+# Cherry-pick — flexible component order (Forma 2 and Forma 4)
+#
+# These rules cover natural orderings where source / destination / artefacts
+# appear in a sequence that the existing Forma 1/3 patterns cannot handle.
+#
+# Forma 2: "VERB de SOURCE a/hacia/en/con DEST [artefacts]"
+#   "trae de feature-x a main solo findings"
+#   "pásame de la actual a main facts y findings"
+#   "incorpora de feature-x a main las decisiones"
+#
+# Guard: (?!\s+todo\b) prevents "trae de X a Y todo" being misclassified as
+# cherry-pick (that phrase has no recognised artefact and no merge signal
+# either, so falling to conversation is the right outcome).
+# ---------------------------------------------------------------------------
+
+@_r(
+    r"^(?:pás[ae]me?|dame?|trae(?:me)?|tráeme?|incorpora(?:r)?)\s+"
+    r"(?:de|desde|from)\s+" + _BRANCH_NAME  # group(1) = source
+    + r"\s+(?:a|hacia|en|con|dentro\s+de)\s+" + _BRANCH_NAME  # group(2) = dest (used by extract_destination)
+    + r"(?!\s+todo\b)(?:\s+.+)?$",
+    "branch_cherry_pick",
+)
+def _cherry_source_dest_artefacts(m, text):
+    # destination is resolved by route() via extract_destination(stripped)
+    return {"source": m.group(1), "artefacts": extract_artefacts(text)}
+
+
+# Forma 4: "VERB a/hacia/en/con DEST [solo] artefacts de/desde SOURCE"
+#   "trae a main las decisiones de feature-x"
+#   "dame a main solo findings de feature-x"
+#   "pásame a main facts y findings de la actual"
+#
+# Guard: (?!todo\b) prevents matching "trae a main todo de X".
+# Risk note: the artefact section is free-form; an ASCII branch name at the
+# end is required.  Sentences like "trae a main el resumen del proyecto de
+# feature-x" classify as cherry-pick (summary artefact, source=feature-x).
+# Branches named with accents won't match _BRANCH_NAME so those fall safely
+# to conversation.
+@_r(
+    r"^(?:pás[ae]me?|dame?|trae(?:me)?|tráeme?)\s+"
+    r"(?:a|hacia|en|con|dentro\s+de)\s+" + _BRANCH_NAME  # group(1) = dest (extract_destination also finds this)
+    + r"\s+(?:solo\s+|únicamente\s+|solamente\s+)?(?:(?:el|los?|las?)\s+)?(?!todo\b)"
+    r"(?:[a-zA-ZáéíóúüñÁÉÍÓÚÜÑ]+(?:\s+y\s+[a-zA-ZáéíóúüñÁÉÍÓÚÜÑ]+)*)"
+    r"\s+(?:de|desde|from)\s+" + _BRANCH_NAME  # group(2) = source
+    + r"\s*$",
+    "branch_cherry_pick",
+)
+def _cherry_dest_artefacts_source(m, text):
+    # destination is extracted from the full text by route() — it finds
+    # "a DEST" via the non-anchored _DEST_BRANCH_RE lookahead.
+    return {"source": m.group(2), "artefacts": extract_artefacts(text)}
+
 
 # "trae solo/las decisiones/findings/... de/desde <branch>"
 # Guard: (?!todo\b) prevents matching "trae todo de X" (that's a full merge).

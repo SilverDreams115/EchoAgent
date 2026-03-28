@@ -951,3 +951,262 @@ class TestCherryPickWithExplicitDestination:
         assert i == "branch_merge"
         assert v["source"] == self.ACTIVE
         assert v["destination"] == "main"
+
+
+class TestFlexibleCherryPickOrder:
+    """
+    Cherry-pick correctly classifies source / destination / artefacts regardless
+    of the order in which they appear in the phrase.
+
+    Forma 1/3 (artefacts → source [→ dest]) — already existed; verified here
+    for non-regression.
+
+    Forma 2 (source → dest [→ artefacts]) — new.
+    Forma 4 (dest → artefacts → source) — new.
+
+    All cases use explicit branch names (no contextual refs) unless noted.
+    Contextual resolution is a separate transformation; it runs before pattern
+    matching and is tested in TestContextualSource*.
+    """
+
+    ACTIVE = "feature-x"
+
+    # ---- Forma 1/3 non-regression: artefacts before source --------------------
+
+    def test_forma1_artefacts_source_dest_at_end(self):
+        i, v = route("trae las decisiones de feature-x a main")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "decisions" in v["artefacts"]
+
+    def test_forma3_no_dest_destination_is_none(self):
+        i, v = route("trae las decisiones de feature-x")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] is None
+        assert "decisions" in v["artefacts"]
+
+    def test_forma1_multiple_artefacts_dest_at_end(self):
+        i, v = route("trae facts y findings de feature-x a main")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "facts" in v["artefacts"]
+        assert "findings" in v["artefacts"]
+
+    # ---- cherry-pick command form: source → dest → artefacts ------------------
+    # (previously broken; fixed by _DEST_BRANCH_RE lookahead)
+
+    def test_cherry_pick_de_source_dest_artefacts(self):
+        i, v = route("cherry-pick de feature-x a main solo decisions")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "decisions" in v["artefacts"]
+
+    def test_cherry_pick_de_source_dest_findings(self):
+        i, v = route("cherry-pick de feature-x a main solo findings")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "findings" in v["artefacts"]
+
+    def test_cherry_pick_de_source_dest_multiple(self):
+        i, v = route("cherry-pick de feature-x a main decisions y findings")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "decisions" in v["artefacts"]
+        assert "findings" in v["artefacts"]
+
+    def test_cherry_pick_de_source_hacia_dest_artefacts(self):
+        i, v = route("cherry-pick de feature-x hacia main solo facts")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "facts" in v["artefacts"]
+
+    def test_cherry_pick_de_source_en_dest_artefacts(self):
+        i, v = route("cherry-pick de feature-x en main solo summary")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "summary" in v["artefacts"]
+
+    # ---- Forma 2: VERB de SOURCE a DEST [artefacts] ---------------------------
+
+    def test_forma2_trae_de_source_a_dest_artefacts(self):
+        i, v = route("trae de feature-x a main solo findings")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "findings" in v["artefacts"]
+
+    def test_forma2_pasame_de_source_a_dest_multiple(self):
+        i, v = route("pásame de feature-x a main facts y findings")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "facts" in v["artefacts"]
+        assert "findings" in v["artefacts"]
+
+    def test_forma2_dame_de_source_a_dest_decisions(self):
+        i, v = route("dame de feature-x a main las decisiones")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "decisions" in v["artefacts"]
+
+    def test_forma2_incorpora_de_source_a_dest_decisions(self):
+        i, v = route("incorpora de feature-x a main las decisiones")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "decisions" in v["artefacts"]
+
+    def test_forma2_trae_de_source_hacia_dest(self):
+        i, v = route("trae de feature-x hacia main solo summary")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "summary" in v["artefacts"]
+
+    def test_forma2_trae_de_source_en_dest(self):
+        i, v = route("trae de feature-x en main los errors")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "errors" in v["artefacts"]
+
+    def test_forma2_no_artefacts_still_cherry_pick(self):
+        # "trae de X a Y" with no artefacts keywords → cherry-pick, artefacts=[]
+        # REPL will default to decisions+findings
+        i, v = route("trae de feature-x a main")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert v["artefacts"] == []
+
+    # ---- Forma 4: VERB a DEST artefacts de SOURCE -----------------------------
+
+    def test_forma4_trae_a_dest_artefacts_de_source(self):
+        i, v = route("trae a main las decisiones de feature-x")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "decisions" in v["artefacts"]
+
+    def test_forma4_dame_a_dest_solo_artefact_de_source(self):
+        i, v = route("dame a main solo findings de feature-x")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "findings" in v["artefacts"]
+
+    def test_forma4_pasame_a_dest_multiple_artefacts_de_source(self):
+        i, v = route("pásame a main facts y findings de feature-x")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "facts" in v["artefacts"]
+        assert "findings" in v["artefacts"]
+
+    def test_forma4_trae_hacia_dest_artefacts_de_source(self):
+        i, v = route("trae hacia main las decisiones de feature-x")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "decisions" in v["artefacts"]
+
+    def test_forma4_dame_a_dest_unicamente_artefact_de_source(self):
+        i, v = route("dame a main únicamente el summary de feature-x")
+        assert i == "branch_cherry_pick"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+        assert "summary" in v["artefacts"]
+
+    # ---- contextual source through new forms ----------------------------------
+
+    def test_forma2_contextual_source_a_dest_artefacts(self):
+        i, v = route("trae de esta rama a main solo findings", active_branch=self.ACTIVE)
+        assert i == "branch_cherry_pick"
+        assert v["source"] == self.ACTIVE
+        assert v["destination"] == "main"
+        assert "findings" in v["artefacts"]
+
+    def test_forma2_contextual_pasame_de_la_actual_a_main(self):
+        i, v = route("pásame de la actual a main facts y findings", active_branch=self.ACTIVE)
+        assert i == "branch_cherry_pick"
+        assert v["source"] == self.ACTIVE
+        assert v["destination"] == "main"
+        assert "facts" in v["artefacts"]
+        assert "findings" in v["artefacts"]
+
+    def test_forma4_contextual_trae_a_dest_artefacts_de_esta_rama(self):
+        i, v = route("trae a main las decisiones de esta rama", active_branch=self.ACTIVE)
+        assert i == "branch_cherry_pick"
+        assert v["source"] == self.ACTIVE
+        assert v["destination"] == "main"
+        assert "decisions" in v["artefacts"]
+
+    def test_forma4_contextual_dame_a_dest_findings_de_la_actual(self):
+        i, v = route("dame a main solo findings de la actual", active_branch=self.ACTIVE)
+        assert i == "branch_cherry_pick"
+        assert v["source"] == self.ACTIVE
+        assert v["destination"] == "main"
+        assert "findings" in v["artefacts"]
+
+    def test_contextual_no_active_branch_falls_to_conversation_forma2(self):
+        i, _ = route("trae de esta rama a main solo findings", active_branch=None)
+        assert i == "conversation"
+
+    def test_contextual_no_active_branch_falls_to_conversation_forma4(self):
+        i, _ = route("trae a main las decisiones de esta rama", active_branch=None)
+        assert i == "conversation"
+
+    # ---- non-regression: merge must NOT become cherry-pick --------------------
+
+    def test_merge_trae_todo_not_affected(self):
+        i, v = route("trae todo de feature-x a main")
+        assert i == "branch_merge"
+        assert v["source"] == "feature-x"
+        assert v["destination"] == "main"
+
+    def test_merge_mezcla_not_affected(self):
+        i, v = route("mezcla feature-x en main")
+        assert i == "branch_merge"
+        assert v["source"] == "feature-x"
+
+    def test_merge_fusiona_not_affected(self):
+        i, v = route("fusiona feature-x con main")
+        assert i == "branch_merge"
+
+    def test_merge_dame_todo_not_affected(self):
+        i, v = route("dame todo de feature-x a main")
+        assert i == "branch_merge"
+        assert v["source"] == "feature-x"
+
+    def test_merge_trae_todo_contextual_not_affected(self):
+        i, v = route("trae todo de esta rama a main", active_branch=self.ACTIVE)
+        assert i == "branch_merge"
+        assert v["source"] == self.ACTIVE
+        assert v["destination"] == "main"
+
+    # ---- ambiguous / conversation fall-through --------------------------------
+
+    def test_forma2_todo_guard_falls_to_conversation(self):
+        # "trae de X a Y todo" — no artefact, but the (?!\s+todo\b) guard fires.
+        # No other rule matches this unusual phrase → conversation.
+        i, _ = route("trae de feature-x a main todo")
+        assert i == "conversation"
+
+    def test_forma4_todo_guard_falls_to_conversation(self):
+        # "trae a main todo de feature-x" — (?!todo\b) guard prevents Forma 4 match.
+        # No other rule matches → conversation.
+        i, _ = route("trae a main todo de feature-x")
+        assert i == "conversation"
+
+    def test_regular_sentence_still_conversation(self):
+        i, _ = route("revisa el módulo de runtime y dime qué falla")
+        assert i == "conversation"

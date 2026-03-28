@@ -904,3 +904,157 @@ def test_cherry_pick_explicit_dest_does_not_update_active_branch(
 
     # Active branch must remain feature-x, not switch to main
     assert harness.branch_store.active_branch_name() == "feature-x"
+
+
+# ---------------------------------------------------------------------------
+# Flexible cherry-pick component order — REPL integration
+# ---------------------------------------------------------------------------
+
+
+def test_forma2_trae_de_source_a_dest_artefacts(harness: ReplHarness) -> None:
+    """
+    'trae de feature-x a main solo decisions' — Forma 2 (source → dest → artefacts).
+
+    Active branch is feature-x but the destination is explicit main.
+    Verifies the full dispatch chain: NL → router (Forma 2) → cherry-pick → main.
+    """
+    harness.add_branch_with_session("feature-x", decisions=["forma2-decision"])
+    harness.branch_store.set_active_branch("feature-x")
+
+    repl = harness.run("trae de feature-x a main solo decisions")
+
+    records = harness.branch_store.load_merge_records("main")
+    assert len(records) == 1
+    assert records[0].source_branch == "feature-x"
+    assert records[0].destination_branch == "main"
+
+    merged = harness.echo_store.load_session(repl._current_session_id)
+    assert any("forma2-decision" in d for d in merged.decisions)
+
+    # active branch must NOT change
+    assert harness.branch_store.active_branch_name() == "feature-x"
+
+
+def test_cherry_pick_de_source_dest_artefacts(harness: ReplHarness) -> None:
+    """
+    'cherry-pick de feature-x a main solo findings' — command form with dest
+    before artefacts.  Previously broken (extract_destination returned None);
+    fixed by _DEST_BRANCH_RE lookahead.
+    """
+    harness.add_branch_with_session(
+        "feature-x",
+        findings=["cmd-form-finding"],
+        decisions=["cmd-form-decision"],
+    )
+    harness.branch_store.set_active_branch("feature-x")
+
+    repl = harness.run("cherry-pick de feature-x a main solo findings")
+
+    records = harness.branch_store.load_merge_records("main")
+    assert len(records) == 1
+    assert records[0].destination_branch == "main"
+
+    merged = harness.echo_store.load_session(repl._current_session_id)
+    assert any("cmd-form-finding" in f for f in merged.findings)
+    # decisions were NOT requested
+    assert not any("cmd-form-decision" in d for d in merged.decisions)
+
+
+def test_forma2_pasame_de_contextual_a_main_multiple(harness: ReplHarness) -> None:
+    """
+    'pásame de esta rama a main facts y findings' — Forma 2 with contextual source.
+
+    Router resolves 'esta rama' → active branch, then Forma 2 pattern fires.
+    """
+    harness.add_branch_with_session(
+        "feature-x",
+        facts=["ctx-fact"],
+        findings=["ctx-finding"],
+        decisions=["ctx-decision"],
+    )
+    harness.branch_store.set_active_branch("feature-x")
+
+    repl = harness.run("pásame de esta rama a main facts y findings")
+
+    records = harness.branch_store.load_merge_records("main")
+    assert len(records) == 1
+    assert records[0].source_branch == "feature-x"
+    assert records[0].destination_branch == "main"
+
+    merged = harness.echo_store.load_session(repl._current_session_id)
+    assert any(
+        "ctx-fact" in f for f in merged.operational_memory.confirmed_facts
+    )
+    assert any("ctx-finding" in f for f in merged.findings)
+    # decisions were NOT requested
+    assert not any("ctx-decision" in d for d in merged.decisions)
+
+    assert harness.branch_store.active_branch_name() == "feature-x"
+
+
+def test_forma4_trae_a_dest_artefacts_de_source(harness: ReplHarness) -> None:
+    """
+    'trae a main las decisiones de feature-x' — Forma 4 (dest → artefacts → source).
+    """
+    harness.add_branch_with_session("feature-x", decisions=["forma4-decision"])
+    harness.branch_store.set_active_branch("feature-x")
+
+    repl = harness.run("trae a main las decisiones de feature-x")
+
+    records = harness.branch_store.load_merge_records("main")
+    assert len(records) == 1
+    assert records[0].source_branch == "feature-x"
+    assert records[0].destination_branch == "main"
+
+    merged = harness.echo_store.load_session(repl._current_session_id)
+    assert any("forma4-decision" in d for d in merged.decisions)
+
+    assert harness.branch_store.active_branch_name() == "feature-x"
+
+
+def test_forma4_contextual_trae_a_dest_artefacts_de_esta_rama(
+    harness: ReplHarness,
+) -> None:
+    """
+    'trae a main los findings de esta rama' — Forma 4 with contextual source.
+    """
+    harness.add_branch_with_session(
+        "feature-x",
+        findings=["ctx-forma4-finding"],
+    )
+    harness.branch_store.set_active_branch("feature-x")
+
+    repl = harness.run("trae a main los findings de esta rama")
+
+    records = harness.branch_store.load_merge_records("main")
+    assert len(records) == 1
+    assert records[0].source_branch == "feature-x"
+    assert records[0].destination_branch == "main"
+
+    merged = harness.echo_store.load_session(repl._current_session_id)
+    assert any("ctx-forma4-finding" in f for f in merged.findings)
+
+    assert harness.branch_store.active_branch_name() == "feature-x"
+
+
+def test_flexible_order_does_not_break_merge(harness: ReplHarness) -> None:
+    """
+    After adding flexible cherry-pick patterns, 'trae todo de esta rama a main'
+    must still classify as a full merge (not cherry-pick).
+    """
+    harness.add_branch_with_session(
+        "feature-x",
+        decisions=["merge-decision"],
+        findings=["merge-finding"],
+    )
+    harness.branch_store.set_active_branch("feature-x")
+
+    repl = harness.run("trae todo de esta rama a main")
+
+    records = harness.branch_store.load_merge_records("main")
+    assert len(records) == 1
+
+    merged = harness.echo_store.load_session(repl._current_session_id)
+    # Both artefact types must be present (full merge, not artefact-filtered)
+    assert any("merge-decision" in d for d in merged.decisions)
+    assert any("merge-finding" in f for f in merged.findings)

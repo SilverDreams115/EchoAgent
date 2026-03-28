@@ -148,6 +148,26 @@ The router understands phrases that refer to the current branch without naming i
 
 **Cherry-pick with contextual source** supports an optional explicit destination ("a main", "hacia main", "en main"). Without one, the destination defaults to the current active branch (standard cherry-pick model). The active branch does NOT change after cherry-pick — only the target branch's session is updated.
 
+### Cherry-pick — component order flexibility
+
+The router accepts multiple natural orderings of source, destination, and artefacts. All of the following are equivalent:
+
+| Order | Example |
+|---|---|
+| artefacts → source → dest | `trae las decisiones de feature-x a main` |
+| source → dest → artefacts | `trae de feature-x a main solo decisions` |
+| dest → artefacts → source | `trae a main las decisiones de feature-x` |
+| command + dest + artefacts | `cherry-pick de feature-x a main solo decisions` |
+
+The same flexibility applies with contextual source references:
+
+```
+trae de esta rama a main solo findings
+pásame de la actual a main facts y findings
+trae a main las decisiones de esta rama
+dame a main solo findings de la actual
+```
+
 Everything else goes directly to the agent as a conversation turn.
 
 ## Branches
@@ -329,7 +349,7 @@ Branch merge and cherry-pick operate directly on these memory layers — the mer
 
 - Natural language routing uses regex rules — complex or ambiguous sentences may fall through to conversation (safe default).
 - Cherry-pick from natural language defaults to `decisions + findings` when no artefact keywords are found; use the slash command for precise control.
-- Cherry-pick explicit destination extraction anchors to end of string — phrases like "cherry-pick de X a main solo decisions" won't resolve the destination; write "cherry-pick de X solo decisions a main" instead.
+- Forma 4 ("trae a DEST artefacts de SOURCE") requires the source to be a valid ASCII branch name at the end of the phrase; branches with accented characters won't match and fall safely to conversation.
 - Branch merge/cherry-pick do not merge raw transcripts, tool call logs, or message history — only structured artefacts.
 - Contextual phrases like "esta rama" require `active_branch` context from the REPL; without it they fall through safely to conversation.
 - "esto" (without "rama") is not a contextual ref — it can match as a branch name if a branch literally named "esto" exists.
