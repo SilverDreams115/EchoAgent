@@ -20,13 +20,13 @@ Inside the REPL:
 
 ```
 [main] > revisa el runtime y dime qué falla
-Echo: ...
+Echo: <respuesta del agente>
 
 [main] > crea una rama experimento-shell
 → Branch 'experimento-shell' creado desde 'main'. Sesión: nueva
 
 [experimento-shell] > en esta rama intenta rediseñar el shell
-Echo: ...
+Echo: <respuesta del agente>
 
 [experimento-shell] > vuelve a main
 → Cambiado a branch 'main'. Sesión: session-abc123
@@ -54,15 +54,35 @@ Cherry-pick 'experimento-shell' → 'main': decisions, findings…
 `echo-agent` opens a REPL directly — no subcommands, no menus.
 
 ```
-╭──────────────────────────────────────────────────────╮
-│ Echo  ·  repo: my-project  ·  branch: main  ·  session: session-abc │
-╰──────────────────────────────────────────────────────╯
-/help para comandos  ·  Ctrl+D para salir
+╭──────────────────────────────────────────────────────────────────────╮
+│ Echo  ·  repo: my-project  ·  branch: main  ·  session: resumida · a1b2c3d4 │
+╰──────────────────────────────────────────────────────────────────────╯
+Enter=enviar  ·  Alt+Enter=nueva línea  ·  /help=comandos  ·  Ctrl+D=salir
 
 [main] >
 ```
 
-The session and active branch are loaded automatically. Each turn is persisted and linked to the previous one via `parent_session_id`.
+The session and active branch are loaded automatically from `.echo/`. Each turn is persisted and linked to the previous one via `parent_session_id`.
+
+### Input model
+
+| Key | Action |
+|---|---|
+| `Enter` | **Envía el mensaje** — comportamiento principal de chat |
+| `Alt+Enter` (o `Esc+Enter`) | Inserta una nueva línea dentro del mensaje — útil para prompts largos y estructurados |
+| `Ctrl+D` | Sale del REPL |
+
+Multiline example:
+```
+[main] > analiza el módulo de runtime:
+  ↳ - enfócate en los stages y el retry logic
+  ↳ - dime si hay deuda técnica obvia
+```
+*(Alt+Enter agrega cada `↳`; Enter al final envía todo como un solo mensaje)*
+
+The `session:` field in the header shows:
+- `nueva` — no prior session found for this branch (fresh start)
+- `resumida · <short-id>` — an existing session was restored automatically from `.echo/`
 
 ### Slash Commands
 
@@ -93,8 +113,40 @@ Branch operations can be expressed naturally:
 | `cambia a feature-x` | `/branch switch feature-x` |
 | `merge experimento-shell` | `/branch merge experimento-shell` |
 | `trae las decisiones de experimento-shell` | `/branch cherry-pick experimento-shell --decisions` |
+| `dame los findings de feature-x` | `/branch cherry-pick feature-x --findings` |
+| `quiero los errores de feature-x` | `/branch cherry-pick feature-x --errors` |
+| `trae todo de feature-x` | `/branch merge feature-x` (full merge) |
+| `pásame todo de feature-x` | `/branch merge feature-x` (full merge) |
+| `extrae las decisiones y findings de feature-x` | `/branch cherry-pick feature-x --decisions --findings` |
 | `lista de ramas` | `/branch list` |
 | `status` | `/session status` |
+
+### Contextual references to the active branch
+
+The router understands phrases that refer to the current branch without naming it explicitly:
+
+| Phrase | Resolves to | Action |
+|---|---|---|
+| `mezcla esta rama en main` | active branch → main | full merge |
+| `fusiona la rama actual con main` | active branch → main | full merge |
+| `haz merge de la actual a main` | active branch → main | full merge |
+| `incorpora todo de esta rama en main` | active branch → main | full merge |
+| `combina esta con main` | active branch → main | full merge |
+| `mezcla esta en main` | active branch → main | full merge |
+| `trae todo de esta rama a main` | active branch → main | full merge |
+| `trae las decisiones de esta rama` | active branch | cherry-pick decisions → active branch |
+| `pásame los findings de la rama actual` | active branch | cherry-pick findings → active branch |
+| `incorpora únicamente el summary de la actual` | active branch | cherry-pick summary → active branch |
+| `trae las decisiones de esta rama a main` | active branch → main | cherry-pick decisions → main |
+| `pásame los findings de la actual a main` | active branch → main | cherry-pick findings → main |
+| `incorpora únicamente el summary de esta rama en main` | active branch → main | cherry-pick summary → main |
+| `trae facts y findings desde esta rama hacia main` | active branch → main | cherry-pick facts + findings → main |
+
+**Supported contextual phrases:** `esta rama`, `esta rama activa`, `la rama actual`, `la rama activa`, `la actual`, `current branch`, `active branch`, `this branch`, `current one`, `esta`.
+
+**Merge with contextual source requires an explicit destination** ("en main", "a main", etc.) when the user is on the source branch — otherwise the destination defaults to the active branch (which would be a self-merge).
+
+**Cherry-pick with contextual source** supports an optional explicit destination ("a main", "hacia main", "en main"). Without one, the destination defaults to the current active branch (standard cherry-pick model). The active branch does NOT change after cherry-pick — only the target branch's session is updated.
 
 Everything else goes directly to the agent as a conversation turn.
 
@@ -276,6 +328,8 @@ Branch merge and cherry-pick operate directly on these memory layers — the mer
 ## Limitations
 
 - Natural language routing uses regex rules — complex or ambiguous sentences may fall through to conversation (safe default).
-- Cherry-pick from natural language defaults to `decisions + findings`; use the slash command for other artefact types.
-- The REPL uses single-line input; for long prompts use the slash command `/plan <text>` or `echocode shell` (which has multi-line Esc+Enter input).
+- Cherry-pick from natural language defaults to `decisions + findings` when no artefact keywords are found; use the slash command for precise control.
+- Cherry-pick explicit destination extraction anchors to end of string — phrases like "cherry-pick de X a main solo decisions" won't resolve the destination; write "cherry-pick de X solo decisions a main" instead.
 - Branch merge/cherry-pick do not merge raw transcripts, tool call logs, or message history — only structured artefacts.
+- Contextual phrases like "esta rama" require `active_branch` context from the REPL; without it they fall through safely to conversation.
+- "esto" (without "rama") is not a contextual ref — it can match as a branch name if a branch literally named "esto" exists.

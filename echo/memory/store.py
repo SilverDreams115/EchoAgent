@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 
-from echo.backends.health import rolling_backend_health_from_log
 from echo.types import ActivityEvent, BackendHealth, ColdMemory, EpisodicMemory, OperationalMemory, PlanStage, SessionState, ToolCallRecord, WorkingMemory
 
 
@@ -135,4 +134,7 @@ class EchoStore:
         return path
 
     def read_backend_health(self) -> BackendHealth:
+        # Lazy import to avoid the echo.backends → echo.memory → echo.backends.health
+        # circular dependency that would occur at module load time.
+        from echo.backends.health import rolling_backend_health_from_log
         return rolling_backend_health_from_log(self.backend_log)

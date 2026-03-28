@@ -12,9 +12,13 @@ from echo.backends.health import (
     effective_backend_health as merged_backend_health,
     normalize_backend_health,
 )
+from typing import TYPE_CHECKING
+
 from echo.config import Settings
-from echo.memory import EchoStore
 from echo.types import BackendHealth
+
+if TYPE_CHECKING:
+    from echo.memory import EchoStore
 
 
 @dataclass(slots=True)

@@ -1,13 +1,28 @@
+"""
+EchoRepl — conversational REPL, primary interface for echo-agent.
+
+Input model
+-----------
+- Enter          → envía el mensaje  (comportamiento principal de chat)
+- Alt+Enter      → nueva línea dentro del mensaje  (Esc+Enter en cualquier terminal)
+- Ctrl + D       → salir del REPL
+
+The REPL accepts a _input_fn parameter for testing: when provided, it is
+called instead of the interactive prompt_toolkit session.  Pass a callable
+that returns the next line (str) or None to signal EOF / exit.
+"""
 from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 
 from prompt_toolkit import prompt as pt_prompt
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -20,38 +35,45 @@ from echo.branches.models import BranchMergeRecord, BranchState
 from echo.branches.store import BranchStore
 from echo.core import EchoAgent
 from echo.types import ActivityEvent
-from echo.ui.intent_router import Intent, route
+from echo.ui.intent_router import Intent, extract_artefacts, route
 
 _HELP_TEXT = """\
 [bold cyan]Echo conversational CLI[/bold cyan]
 
 Escribe naturalmente — sin prefijos obligatorios.
 
+[bold]Input:[/bold]
+  [cyan]Enter[/cyan]          → enviar el mensaje
+  [cyan]Alt + Enter[/cyan]    → nueva línea dentro del mensaje  (Esc+Enter en cualquier terminal)
+  [cyan]Ctrl + D[/cyan]       → salir de Echo
+
 [bold]Slash commands:[/bold]
-  [cyan]/help[/cyan]                                        Esta ayuda
-  [cyan]/exit[/cyan]                                        Salir de Echo
-  [cyan]/session status[/cyan]                              Info de sesión activa
-  [cyan]/session new[/cyan]                                 Sesión limpia en esta rama
-  [cyan]/branch status[/cyan]                               Info de la rama activa
-  [cyan]/branch list[/cyan]                                 Listar todas las ramas
-  [cyan]/branch new <nombre>[/cyan]                         Crear y activar rama
-  [cyan]/branch switch <nombre>[/cyan]                      Cambiar a rama existente
-  [cyan]/branch show <nombre>[/cyan]                        Detalles de una rama
-  [cyan]/branch merge <fuente> [--strategy S][/cyan]        Merge desde otra rama
+  [cyan]/help[/cyan]
+  [cyan]/exit[/cyan]
+  [cyan]/session status[/cyan]
+  [cyan]/session new[/cyan]
+  [cyan]/branch status[/cyan]
+  [cyan]/branch list[/cyan]
+  [cyan]/branch new <nombre>[/cyan]
+  [cyan]/branch switch <nombre>[/cyan]
+  [cyan]/branch show <nombre>[/cyan]
+  [cyan]/branch merge <fuente> [--strategy union-deduplicate|prefer-source|prefer-destination][/cyan]
   [cyan]/branch cherry-pick <fuente> [--decisions] [--findings] [--pending] [--facts] [--summary][/cyan]
+  [cyan]/doctor[/cyan]
 
 [bold]Estrategias de merge:[/bold]
   union-deduplicate (default) · prefer-source · prefer-destination
 
-[bold]Lenguaje natural:[/bold]
+[bold]Lenguaje natural (ejemplos):[/bold]
   crea una rama experimento-shell
   vuelve a main · cambia a feature-x
   merge experimento-shell
   trae las decisiones de experimento-shell
-  cherry-pick feature-x
+  pásame los findings de feature-x
+  cherry-pick feature-x --summary --facts
 """
 
-_ARTEFACT_FLAG_MAP = {
+_ARTEFACT_FLAG_MAP: dict[str, str] = {
     "--decisions": "decisions",
     "--findings": "findings",
     "--pending": "pending",
@@ -66,6 +88,33 @@ def _parse_artefact_flags(args: list[str]) -> list[str]:
     return [_ARTEFACT_FLAG_MAP[a.lower()] for a in args if a.lower() in _ARTEFACT_FLAG_MAP]
 
 
+def _build_chat_kb() -> KeyBindings:
+    """Key bindings for the chat prompt.
+
+    Enter submits the current message (primary chat action).
+    Alt+Enter (Esc+Enter in any terminal) inserts a newline for multiline messages.
+    Ctrl+D signals exit.
+    """
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _submit(event):
+        """Enter submits the buffer — default chat behavior."""
+        event.app.exit(result=event.app.current_buffer.text)
+
+    @kb.add("escape", "enter")
+    def _newline(event):
+        """Alt+Enter (Esc+Enter) inserts a newline for multiline messages."""
+        event.app.current_buffer.insert_text("\n")
+
+    @kb.add("c-d")
+    def _eof(event):
+        """Ctrl+D signals exit."""
+        event.app.exit(result=None)
+
+    return kb
+
+
 class EchoRepl:
     """
     Conversational REPL — the primary interface for echo-agent.
@@ -73,6 +122,13 @@ class EchoRepl:
     The user types natural language directly (no /ask, /plan, /resume required).
     Branch operations, merge, and cherry-pick are available via natural phrasing
     or explicit slash commands.
+
+    Parameters
+    ----------
+    _input_fn
+        Optional callable for testing.  When provided, replaces the interactive
+        prompt_toolkit input.  Should return str for each turn or None to signal
+        EOF / exit.  Ignored in normal (non-test) usage.
     """
 
     def __init__(
@@ -81,11 +137,14 @@ class EchoRepl:
         project_root: Path,
         console: Console,
         branch_store: BranchStore,
+        *,
+        _input_fn: Callable[[], str | None] | None = None,
     ) -> None:
         self.agent = agent
         self.project_root = project_root
         self.console = console
         self.branch_store = branch_store
+        self._input_fn = _input_fn
         self._queue: Queue[ActivityEvent] = Queue()
         self.agent.activity.watch(self._queue.put)
         # Restore current session from active branch (or fall back to store's latest)
@@ -94,6 +153,8 @@ class EchoRepl:
             branch_store.active_session_for_branch(active_branch)
             or agent.store.latest_session_id()
         )
+        # Track whether a session was found at startup (used by _print_header)
+        self._session_resumed: bool = self._current_session_id is not None
 
     # ------------------------------------------------------------------
     # Header + prompt
@@ -101,7 +162,10 @@ class EchoRepl:
 
     def _print_header(self) -> None:
         branch = self.branch_store.active_branch_name()
-        session = self._current_session_id or "nueva"
+        if self._session_resumed and self._current_session_id:
+            session_label = f"resumida · {self._current_session_id[:8]}"
+        else:
+            session_label = "nueva"
         t = Text()
         t.append("Echo", style="bold bright_cyan")
         t.append("  ·  repo: ", style="dim white")
@@ -109,16 +173,29 @@ class EchoRepl:
         t.append("  ·  branch: ", style="dim white")
         t.append(branch, style="bold green")
         t.append("  ·  session: ", style="dim white")
-        t.append(session[:18], style="white")
+        t.append(session_label, style="white")
         self.console.print(Panel(t, border_style="bright_black", padding=(0, 1)))
-        self.console.print("[dim]/help para comandos  ·  Ctrl+D para salir[/dim]\n")
+        self.console.print(
+            "[dim]Enter=enviar  ·  Alt+Enter=nueva línea  ·  /help=comandos  ·  Ctrl+D=salir[/dim]\n"
+        )
 
     def _prompt_line(self) -> str | None:
+        if self._input_fn is not None:
+            return self._input_fn()
+
         history_file = self.project_root / ".echo" / "prompt_history.txt"
         history = FileHistory(str(history_file))
         branch = self.branch_store.active_branch_name()
+        kb = _build_chat_kb()
         try:
-            return pt_prompt(f"[{branch}] > ", history=history)
+            result = pt_prompt(
+                f"[{branch}] > ",
+                history=history,
+                multiline=True,
+                key_bindings=kb,
+                prompt_continuation="  ↳ ",
+            )
+            return result
         except (EOFError, KeyboardInterrupt):
             return None
 
@@ -225,7 +302,9 @@ class EchoRepl:
             branch = self.branch_store.active_branch_name()
             lines = [f"branch: [bold green]{branch}[/bold green]"]
             lines += [f"{k}: {v}" for k, v in status.items()]
-            self.console.print(Panel("\n".join(lines), title="Session Status", border_style="cyan", expand=False))
+            self.console.print(
+                Panel("\n".join(lines), title="Session Status", border_style="cyan", expand=False)
+            )
             return
 
         if sub == "new":
@@ -249,7 +328,9 @@ class EchoRepl:
             if self.branch_store.branch_exists(name):
                 self._print_branch_info(self.branch_store.load_branch(name), active=True)
             else:
-                self.console.print(f"[yellow]Branch '{name}' no tiene metadata aún (se crea al primer uso).[/yellow]")
+                self.console.print(
+                    f"[yellow]Branch '{name}' no tiene metadata aún (se crea al primer uso).[/yellow]"
+                )
             return
 
         if sub == "list":
@@ -270,7 +351,9 @@ class EchoRepl:
                 self.console.print(f"[red]Branch '{name}' no existe.[/red]")
             else:
                 active = self.branch_store.active_branch_name()
-                self._print_branch_info(self.branch_store.load_branch(name), active=(name == active))
+                self._print_branch_info(
+                    self.branch_store.load_branch(name), active=(name == active)
+                )
             return
 
         if sub == "merge" and rest:
@@ -284,13 +367,18 @@ class EchoRepl:
 
         if sub in {"cherry-pick", "cherry_pick"} and rest:
             source = rest[0]
+            # Try explicit flags first; fall back to text extraction
             atypes = _parse_artefact_flags(rest[1:])
+            if not atypes:
+                atypes = extract_artefacts(" ".join(rest[1:]))
             if not atypes:
                 atypes = ["decisions", "findings"]
             self._do_cherry_pick(source, atypes)
             return
 
-        self.console.print(f"[yellow]Subcomando de branch desconocido: {sub}. Usa /help.[/yellow]")
+        self.console.print(
+            f"[yellow]Subcomando de branch desconocido: {sub}. Usa /help.[/yellow]"
+        )
 
     def _cmd_branch_list(self) -> None:
         branches = self.branch_store.list_branches()
@@ -317,7 +405,9 @@ class EchoRepl:
         )
         if b.description:
             text += f"description:    {b.description}\n"
-        self.console.print(Panel(text, title=f"Branch: {b.name}", border_style="green", expand=False))
+        self.console.print(
+            Panel(text, title=f"Branch: {b.name}", border_style="green", expand=False)
+        )
 
     # ------------------------------------------------------------------
     # Branch operations
@@ -337,7 +427,9 @@ class EchoRepl:
         self.branch_store.set_active_branch(name)
         self._current_session_id = self.branch_store.active_session_for_branch(name)
         session_label = self._current_session_id or "nueva"
-        self.console.print(f"[green]→ Ahora en branch '[bold]{name}[/bold]'.  Sesión: {session_label}[/green]")
+        self.console.print(
+            f"[green]→ Ahora en branch '[bold]{name}[/bold]'.  Sesión: {session_label}[/green]"
+        )
 
     def _switch_branch(self, name: str) -> None:
         if not self.branch_store.branch_exists(name):
@@ -349,10 +441,19 @@ class EchoRepl:
         self.branch_store.set_active_branch(name)
         self._current_session_id = self.branch_store.active_session_for_branch(name)
         session_label = self._current_session_id or "nueva"
-        self.console.print(f"[green]→ Cambiado a branch '[bold]{name}[/bold]'.  Sesión: {session_label}[/green]")
+        self.console.print(
+            f"[green]→ Cambiado a branch '[bold]{name}[/bold]'.  Sesión: {session_label}[/green]"
+        )
 
-    def _do_merge(self, source: str, strategy: str = "union-deduplicate") -> None:
-        dest = self.branch_store.active_branch_name()
+    def _do_merge(
+        self,
+        source: str,
+        strategy: str = "union-deduplicate",
+        destination: str | None = None,
+    ) -> None:
+        # Honor an explicit destination from the NL phrase ("mezcla X en main").
+        # Fall back to the active branch when the phrase has no destination suffix.
+        dest = destination or self.branch_store.active_branch_name()
         if source == dest:
             self.console.print("[yellow]No puedes hacer merge de una rama consigo misma.[/yellow]")
             return
@@ -361,7 +462,9 @@ class EchoRepl:
             return
         valid = {"union-deduplicate", "prefer-source", "prefer-destination"}
         if strategy not in valid:
-            self.console.print(f"[red]Estrategia '{strategy}' inválida. Válidas: {', '.join(sorted(valid))}[/red]")
+            self.console.print(
+                f"[red]Estrategia '{strategy}' inválida. Válidas: {', '.join(sorted(valid))}[/red]"
+            )
             return
         self.console.print(f"[cyan]Mergeando '{source}' → '{dest}' [{strategy}]…[/cyan]")
         try:
@@ -377,15 +480,24 @@ class EchoRepl:
         except ValueError as exc:
             self.console.print(f"[red]Error en merge:[/red] {exc}")
 
-    def _do_cherry_pick(self, source: str, artefact_types: list[str]) -> None:
-        dest = self.branch_store.active_branch_name()
+    def _do_cherry_pick(
+        self,
+        source: str,
+        artefact_types: list[str],
+        destination: str | None = None,
+    ) -> None:
+        dest = destination or self.branch_store.active_branch_name()
         if source == dest:
-            self.console.print("[yellow]No puedes cherry-pick de una rama consigo misma.[/yellow]")
+            self.console.print(
+                "[yellow]No puedes cherry-pick de una rama consigo misma.[/yellow]"
+            )
             return
         if not self.branch_store.branch_exists(source):
             self.console.print(f"[red]Branch fuente '{source}' no existe.[/red]")
             return
-        self.console.print(f"[cyan]Cherry-pick '{source}' → '{dest}': {', '.join(artefact_types)}…[/cyan]")
+        self.console.print(
+            f"[cyan]Cherry-pick '{source}' → '{dest}': {', '.join(artefact_types)}…[/cyan]"
+        )
         try:
             record, new_session = cherry_pick(
                 source_branch=source,
@@ -399,7 +511,9 @@ class EchoRepl:
         except ValueError as exc:
             self.console.print(f"[red]Error en cherry-pick:[/red] {exc}")
 
-    def _print_op_result(self, record: BranchMergeRecord, is_cherry_pick: bool = False) -> None:
+    def _print_op_result(
+        self, record: BranchMergeRecord, is_cherry_pick: bool = False
+    ) -> None:
         op = "Cherry-pick" if is_cherry_pick else "Merge"
         total_in = sum(len(v) for v in record.items_merged.values())
         total_conf = sum(len(v) for v in record.conflicts.values())
@@ -413,7 +527,9 @@ class EchoRepl:
         if total_conf:
             lines.append(f"[yellow]Conflictos: {total_conf}[/yellow]")
         lines.append(f"Nueva sesión: [dim]{record.destination_session_id}[/dim]")
-        self.console.print(Panel("\n".join(lines), title=f"{op}", border_style="green", expand=False))
+        self.console.print(
+            Panel("\n".join(lines), title=f"{op}", border_style="green", expand=False)
+        )
 
     # ------------------------------------------------------------------
     # Natural language intent dispatch
@@ -421,49 +537,66 @@ class EchoRepl:
 
     def _handle_natural_intent(self, intent: str, values: dict) -> bool:
         """Return True if the intent was handled (not a conversation turn)."""
+
         if intent == "branch_new":
             name = values.get("name", "")
             if name:
                 self._create_and_switch_branch(name)
                 return True
+
         elif intent == "branch_switch":
             name = values.get("name", "")
             if name:
                 self._switch_branch(name)
                 return True
+
         elif intent == "branch_list":
             self._cmd_branch_list()
             return True
+
         elif intent == "branch_status":
             self._handle_branch_cmd(["status"])
             return True
+
         elif intent == "branch_show":
             name = values.get("name", "")
             if name:
                 self._handle_branch_cmd(["show", name])
                 return True
+
         elif intent == "branch_merge":
             source = values.get("source", "")
+            destination = values.get("destination") or None
             if source:
-                self._do_merge(source)
+                self._do_merge(source, destination=destination)
                 return True
+
         elif intent == "branch_cherry_pick":
             source = values.get("source", "")
+            artefacts: list[str] = values.get("artefacts") or []
+            destination = values.get("destination") or None
+            if not artefacts:
+                artefacts = ["decisions", "findings"]
             if source:
-                self._do_cherry_pick(source, ["decisions", "findings"])
+                self._do_cherry_pick(source, artefacts, destination=destination)
                 return True
+
         elif intent == "session_status":
             self._handle_session_cmd(["status"])
             return True
+
         elif intent == "session_new":
             self._handle_session_cmd(["new"])
             return True
+
         elif intent == "exit":
             self.console.print("Saliendo. Hasta luego.")
             sys.exit(0)
+
         elif intent == "help":
             self.console.print(Panel(_HELP_TEXT, title="Ayuda", border_style="cyan"))
             return True
+
         return False
 
     # ------------------------------------------------------------------
@@ -486,8 +619,10 @@ class EchoRepl:
                 self._handle_slash(text)
                 continue
 
-            # Natural language routing
-            intent, values = route(text)
+            # Natural language routing — pass active branch so contextual
+            # phrases like "mezcla esta rama en main" can be resolved.
+            active_branch = self.branch_store.active_branch_name()
+            intent, values = route(text, active_branch=active_branch)
             if intent != "conversation":
                 if self._handle_natural_intent(intent, values):
                     continue
